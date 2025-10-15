@@ -98,7 +98,7 @@ orderCtlr.create = async ({ body }) => {
     };
 
     // Emit notification via Socket.IO for restaurant approval
-    socketService.emitOrderNotification(orderObj.restaurantId, {
+    const notificationData = {
         restaurantId: orderObj.restaurantId,
         type: orderObj.orderType === "Dine-In" ? "Dine In Order" : "Home Delivery Order",
         tableNo: table ? table.tableNumber : null,
@@ -107,7 +107,9 @@ orderCtlr.create = async ({ body }) => {
             : orderObj.orderType === "Home-Delivery" ? `New Home Delivery Order Request` : `New Take Away Order Request`,
         // tempOrder: orderObj, // Send temp order for approval
         orderDetails: populatedOrderDetails
-    });
+    };
+    
+    socketService.emitOrderNotification(orderObj.restaurantId, notificationData);
 
     // Return success message with guestId for tracking
     return { 
@@ -172,7 +174,6 @@ orderCtlr.listAllOrders = async () => {
         })
         .populate('restaurantId', 'name address')
         .populate('tableId', 'tableNumber');
-    // console.log(orders)
     if(!orders || orders.length === 0) {
         return { message: "No orders found", data: null }
     } else {
@@ -226,7 +227,7 @@ orderCtlr.listRestaurantOrders = async ({ user, query }) => {
 };
 
 orderCtlr.getMyOrders = async ({ params: { guestId } }) => {
-    const orders = await Order.find({ guestId : guestId }).sort({ orderId : 1 })
+    const orders = await Order.find({ guestId : guestId }).sort({ createdAt: -1 })
         .populate({
             path: 'lineItems.productId',
             populate: { path: 'categoryId', select: 'name translations' },
@@ -234,7 +235,6 @@ orderCtlr.getMyOrders = async ({ params: { guestId } }) => {
         })
         .populate('restaurantId', 'name address')
         .populate('tableId', 'tableNumber');
-    // console.log(orders)
     if(!orders || orders.length === 0) {
         return { message: "No orders found", data: null }
     } else {
@@ -251,7 +251,7 @@ orderCtlr.getMyRestaurantOrders = async ({ params: { guestId, restaurantId } }) 
     const orders = await Order.find({ 
         guestId: guestId,
         restaurantId: restaurantId 
-    }).sort({ orderId: 1 })
+    }).sort({ createdAt: -1 })
         .populate({
             path: 'lineItems.productId',
             populate: { path: 'categoryId', select: 'name translations' },
@@ -293,7 +293,12 @@ orderCtlr.cancelOrder = async ({ params: { orderId, guestId }, body }) => {
         throw { status: 400, message: "Valid Order ID is required" };
     }
 
-    const updatedBody = pick(body, ['status']);
+    // Validate cancellation reason if status is Cancelled
+    if (body.status === 'Cancelled' && !body.cancellationReason) {
+        throw { status: 400, message: "Cancellation reason is required when cancelling an order" };
+    }
+
+    const updatedBody = pick(body, ['status', 'cancellationReason']);
     let cancelledOrder;
 
     cancelledOrder = await Order.findOneAndUpdate({_id: orderId, guestId: guestId}, updatedBody, { new: true })
@@ -308,6 +313,21 @@ orderCtlr.cancelOrder = async ({ params: { orderId, guestId }, body }) => {
     if (!cancelledOrder) {
         return { message: "No Order found", data: null };
     }
+
+
+    // Emit socket event to notify admin about order cancellation
+    const cancellationData = {
+        orderId: cancelledOrder._id,
+        orderNo: cancelledOrder.orderNo,
+        orderType: cancelledOrder.orderType,
+        tableNo: cancelledOrder.tableId?.tableNumber || null,
+        customerName: cancelledOrder.deliveryAddress?.name || null,
+        customerPhone: cancelledOrder.deliveryAddress?.phone.countryCode + cancelledOrder.deliveryAddress?.phone.number || null,
+        cancellationReason: cancelledOrder.cancellationReason,
+        cancelledAt: new Date()
+    };
+    
+    socketService.emitToRestaurant(cancelledOrder.restaurantId._id, 'order_cancelled', cancellationData);
 
     return {
         message: 'Order Cancelled Successfully',
@@ -336,7 +356,32 @@ orderCtlr.changeStatus = async ({ params: { orderId }, user, body }) => {
     }
 
     const updatedBody = pick(body, ['status']);
-    const updatedOrder = await Order.findByIdAndUpdate(orderId, updatedBody, { new: true });
+    const updatedOrder = await Order.findByIdAndUpdate(orderId, updatedBody, { new: true }).populate('restaurantId', 'name address').populate('tableId', 'tableNumber');
+
+    console.log('🚨 Updated Order:', updatedOrder);
+
+    // Emit status change notification to customer
+    const statusChangeData = {
+        orderId: updatedOrder._id,
+        orderNo: updatedOrder.orderNo,
+        status: updatedOrder.status,
+        orderType: updatedOrder.orderType,
+        tableNo: updatedOrder.tableId?.tableNumber || null,
+        customerName: updatedOrder.deliveryAddress?.name || null,
+        customerPhone: updatedOrder.deliveryAddress?.phone?.countryCode + updatedOrder.deliveryAddress?.phone?.number || null,
+        changedAt: new Date()
+    };
+
+    // If admin is cancelling, add cancellation reason to the data
+    if (updatedOrder.status === 'Cancelled' && updatedOrder.cancellationReason) {
+        statusChangeData.cancellationReason = updatedOrder.cancellationReason;
+    }
+
+    // Emit to customer's guest room instead of restaurant room
+    const guestId = updatedOrder.guestId;
+    if (guestId) {
+        socketService.emitToGuest(guestId, 'order_status_changed', statusChangeData);
+    }
 
     return {
         message: 'Order Status Changed',
@@ -344,6 +389,7 @@ orderCtlr.changeStatus = async ({ params: { orderId }, user, body }) => {
         data: updatedOrder
     };
 };
+
 
 orderCtlr.delete = async ({ params: { orderId }, user }) => {
     if (!orderId || !mongoose.Types.ObjectId.isValid(orderId)) {
@@ -363,6 +409,49 @@ orderCtlr.delete = async ({ params: { orderId }, user }) => {
     const deletedOrder = await Order.findByIdAndDelete(orderId);
 
     return { message: "Order deleted Successfully", data: deletedOrder };
+};
+
+orderCtlr.bulkDelete = async ({ body: { orderIds }, user }) => {
+    if (!orderIds || !Array.isArray(orderIds) || orderIds.length === 0) {
+        throw { status: 400, message: "Order IDs array is required" };
+    }
+
+    // Validate all order IDs
+    const invalidIds = orderIds.filter(id => !mongoose.Types.ObjectId.isValid(id));
+    if (invalidIds.length > 0) {
+        throw { status: 400, message: "Invalid Order IDs provided" };
+    }
+
+    // Get user data to verify restaurant ownership
+    const userData = await User.findById(user.id);
+    if (!userData) {
+        throw { status: 404, message: "User not found" };
+    }
+
+    const restaurantId = userData.restaurantId;
+    if (!restaurantId) {
+        throw { status: 403, message: "User is not associated with any restaurant" };
+    }
+
+    // Find all orders and verify ownership
+    const orders = await Order.find({ _id: { $in: orderIds } });
+    if (orders.length !== orderIds.length) {
+        throw { status: 404, message: "Some orders not found" };
+    }
+
+    // Verify all orders belong to the user's restaurant
+    const unauthorizedOrders = orders.filter(order => String(order.restaurantId) !== String(restaurantId));
+    if (unauthorizedOrders.length > 0) {
+        throw { status: 403, message: "You are not authorized to delete some of these orders" };
+    }
+
+    // Delete all orders
+    const deletedOrders = await Order.deleteMany({ _id: { $in: orderIds } });
+
+    return { 
+        message: `${deletedOrders.deletedCount} orders deleted successfully`, 
+        data: { deletedCount: deletedOrders.deletedCount } 
+    };
 };
 
 module.exports = orderCtlr

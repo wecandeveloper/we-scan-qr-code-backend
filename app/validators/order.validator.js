@@ -103,10 +103,45 @@ const changeOrderValidationShcema = {
             ]],
             errorMessage: "Status must be one of the valid order statuses",
         },
+    },
+    cancellationReason: {
+        optional: true,
+        isString: {
+            errorMessage: "Cancellation reason must be a string",
+        },
+        isLength: {
+            options: { min: 1, max: 500 },
+            errorMessage: "Cancellation reason must be between 1 and 500 characters",
+        },
+        custom: {
+            options: (value, { req }) => {
+                // If status is 'Cancelled', cancellationReason is required
+                if (req.body.status === 'Cancelled' && (!value || value.trim().length === 0)) {
+                    throw new Error("Cancellation reason is required when cancelling an order");
+                }
+                return true;
+            },
+        },
     }
 }
 
+const adminCancelValidationSchema = {
+    cancellationReason: {
+        notEmpty: {
+            errorMessage: "Cancellation reason is required",
+        },
+        isString: {
+            errorMessage: "Cancellation reason must be a string",
+        },
+        isLength: {
+            options: { min: 5, max: 500 },
+            errorMessage: "Cancellation reason must be between 5 and 500 characters",
+        },
+    },
+};
+
 module.exports = {
     orderValidationSchema,
-    changeOrderValidationShcema
+    changeOrderValidationShcema,
+    adminCancelValidationSchema
 };

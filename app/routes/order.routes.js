@@ -5,7 +5,7 @@ const orderCtlr = require('../controllers/order.controller')
 const { authenticateUser, authorizeUser } = require('../middlewares/auth');
 const setupRoutes = require('./route.util');
 const { checkSchema } = require('express-validator');
-const {changeOrderValidationShcema, orderValidationSchema} = require('../validators/order.validator');
+const {changeOrderValidationShcema, orderValidationSchema, adminCancelValidationSchema} = require('../validators/order.validator');
 
 const routes = [
     {
@@ -93,6 +93,15 @@ const routes = [
             authorizeUser(['restaurantAdmin'])
         ],
         handler: orderCtlr.delete,
+    },
+    {
+        method: 'delete',
+        path: '/bulk-delete',
+        middlewares: [
+            authenticateUser,
+            authorizeUser(['restaurantAdmin'])
+        ],
+        handler: orderCtlr.bulkDelete,
     },
 ]
 

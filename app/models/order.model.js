@@ -50,6 +50,12 @@ const orderSchema = new Schema({
     orderDate: {
         type: Date,
         default: Date.now
+    },
+    cancellationReason: {
+        type: String,
+        required: function() {
+            return this.status === 'Cancelled';
+        }
     }
 }, { timestamps: true });
 
