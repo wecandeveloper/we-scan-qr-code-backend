@@ -239,7 +239,17 @@ restaurantCtlr.list = async () => {
 
 // Get My Restaurant
 restaurantCtlr.myRestaurant = async ({ user }) => {
+    // Validate user exists and has proper role
     const userData = await User.findById(user.id);
+    if (!userData) {
+        throw { status: 404, message: "User not found" };
+    }
+
+    // Check if user has restaurant admin role
+    if (userData.role !== 'restaurantAdmin') {
+        throw { status: 403, message: "Access denied. Restaurant admin role required" };
+    }
+
     const userRestaurantId = userData.restaurantId;
     if (!userRestaurantId || !mongoose.Types.ObjectId.isValid(userRestaurantId)) {
         throw { status: 400, message: "Valid Restaurant ID is required" };
@@ -249,6 +259,16 @@ restaurantCtlr.myRestaurant = async ({ user }) => {
         .populate('adminId', 'firstName lastName email')
     if (!restaurant) {
         throw { status: 404, message: "Restaurant not found" };
+    }
+
+    // Additional security check: Ensure the restaurant belongs to the requesting user
+    if (String(restaurant.adminId._id) !== String(user.id)) {
+        throw { status: 403, message: "Access denied. You are not authorized to access this restaurant" };
+    }
+
+    // Check if restaurant is blocked
+    if (restaurant.isBlocked) {
+        throw { status: 403, message: "Restaurant is currently blocked. Please contact support" };
     }
 
     return { data: restaurant };
