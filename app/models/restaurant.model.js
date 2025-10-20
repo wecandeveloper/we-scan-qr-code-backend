@@ -135,6 +135,20 @@ const restaurantSchema = new Schema({
         type: Boolean, 
         default: true 
     },
+    operatingHours: {
+        openingTime: {
+            type: String,
+            default: "00:00" // Format: "HH:MM" (24-hour format)
+        },
+        closingTime: {
+            type: String,
+            default: "23:59" // Format: "HH:MM" (24-hour format)
+        },
+        timezone: {
+            type: String,
+            default: "Asia/Dubai" // UAE timezone
+        }
+    }
 }, { timestamps: true });
 
 // restaurantSchema.plugin(AutoIncrement, { inc_field: 'restaurantId' })

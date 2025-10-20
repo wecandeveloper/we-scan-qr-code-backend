@@ -80,6 +80,12 @@ const routes = [
         handler: orderCtlr.getMyRestaurantOrders,
     },
     {
+        method: 'delete',
+        path: '/myRestaurantOrders/previous/:guestId/:restaurantId',
+        middlewares: [],
+        handler: orderCtlr.deletePreviousMyRestaurantOrders,
+    },
+    {
         method: 'get',
         path: '/show/:orderId',
         middlewares: [],

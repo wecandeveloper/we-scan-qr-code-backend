@@ -191,7 +191,12 @@ restaurantCtlr.create = async ({ body, files, user }) => {
         isDineInAvailable: body.isDineInAvailable || true,
         isHomeDeliveryAvailable: body.isHomeDeliveryAvailable || false,
         isTakeAwayAvailable: body.isTakeAwayAvailable || false,
-        isCustomerOrderAvailable: body.isCustomerOrderAvailable || true
+        isCustomerOrderAvailable: body.isCustomerOrderAvailable || true,
+        operatingHours: {
+            openingTime: body.openingTime || "00:00",
+            closingTime: body.closingTime || "23:59",
+            timezone: body.timezone || "Asia/Dubai"
+        }
     });
 
     // ✅ Auto-generate tables if tableCount is provided
@@ -394,7 +399,12 @@ restaurantCtlr.update = async ({ params: { restaurantId }, body, files, user }) 
         },
         socialMediaLinks: socialMediaLinks,
         isCustomerOrderAvailable: body.isCustomerOrderAvailable || true,
-        folderKey : existingRestaurant.folderKey || `We-QrCode/${existingRestaurant.slug}`
+        folderKey : existingRestaurant.folderKey || `We-QrCode/${existingRestaurant.slug}`,
+        operatingHours: {
+            openingTime: body.openingTime || existingRestaurant.operatingHours?.openingTime || "00:00",
+            closingTime: body.closingTime || existingRestaurant.operatingHours?.closingTime || "23:59",
+            timezone: body.timezone || existingRestaurant.operatingHours?.timezone || "Asia/Dubai"
+        }
 
     };
 

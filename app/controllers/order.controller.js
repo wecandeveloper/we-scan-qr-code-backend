@@ -5,8 +5,10 @@ const { pick } = require('lodash')
 const Product = require('../models/product.model')
 const Table = require('../models/table.model');
 const User = require('../models/user.model');
+const Restaurant = require('../models/restaurant.model');
 const Counter = require("../models/counter.model");
 const socketService = require('../services/socketService/socketService');
+const { getBusinessDayBoundaries, getBusinessWeekBoundaries, getBusinessMonthBoundaries } = require('../utils/timezoneUtils');
 // const Address = require('../models/address.model')
 
 async function getOrCreateGuestId(body) {
@@ -188,23 +190,30 @@ orderCtlr.listRestaurantOrders = async ({ user, query }) => {
 
     if (!restaurantId) throw { status: 403, message: "You are not assigned to any restaurant" };
 
+    // Get restaurant operating hours
+    const restaurant = await Restaurant.findById(restaurantId);
+    if (!restaurant) throw { status: 404, message: "Restaurant not found" };
+
+    const operatingHours = restaurant.operatingHours || {
+        openingTime: "00:00",
+        closingTime: "23:59",
+        timezone: "Asia/Dubai"
+    };
+
     // Default: no filter (return all)
     let dateFilter = {};
 
     const now = new Date();
 
     if (query.filter === "daily") {
-        const startOfDay = new Date();
-        startOfDay.setHours(0, 0, 0, 0);
-        dateFilter = { createdAt: { $gte: startOfDay, $lte: now } };
+        const { startDate, endDate } = getBusinessDayBoundaries(operatingHours, now);
+        dateFilter = { createdAt: { $gte: startDate, $lte: endDate } };
     } else if (query.filter === "weekly") {
-        const startOfWeek = new Date();
-        startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay()); // Sunday
-        startOfWeek.setHours(0, 0, 0, 0);
-        dateFilter = { createdAt: { $gte: startOfWeek, $lte: now } };
+        const { startDate, endDate } = getBusinessWeekBoundaries(operatingHours, now);
+        dateFilter = { createdAt: { $gte: startDate, $lte: endDate } };
     } else if (query.filter === "monthly") {
-        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-        dateFilter = { createdAt: { $gte: startOfMonth, $lte: now } };
+        const { startDate, endDate } = getBusinessMonthBoundaries(operatingHours, now);
+        dateFilter = { createdAt: { $gte: startDate, $lte: endDate } };
     } else if (query.from && query.to) {
         // Custom range
         const fromDate = new Date(query.from);
@@ -247,11 +256,37 @@ orderCtlr.getMyRestaurantOrders = async ({ params: { guestId, restaurantId } }) 
     if (!restaurantId || !mongoose.Types.ObjectId.isValid(restaurantId)) {
         throw { status: 400, message: "Valid Restaurant ID is required" };
     }
-    
-    const orders = await Order.find({ 
+
+    // Fetch restaurant to get operating hours
+    const restaurant = await Restaurant.findById(restaurantId);
+    if (!restaurant) throw { status: 404, message: "Restaurant not found" };
+
+    const operatingHours = restaurant.operatingHours || {
+        openingTime: "00:00",
+        closingTime: "23:59",
+        timezone: "Asia/Dubai"
+    };
+
+    // Limit to current business-day window
+    const now = new Date();
+    const { startDate, endDate } = getBusinessDayBoundaries(operatingHours, now);
+
+    // Auto-clean previous or out-of-window orders for this guest in this restaurant
+    await Order.deleteMany({
         guestId: guestId,
-        restaurantId: restaurantId 
-    }).sort({ createdAt: -1 })
+        restaurantId: restaurantId,
+        $or: [
+            { createdAt: { $lt: startDate } },
+            { createdAt: { $gt: endDate } }
+        ]
+    });
+
+    const orders = await Order.find({
+        guestId: guestId,
+        restaurantId: restaurantId,
+        createdAt: { $gte: startDate, $lte: endDate }
+    })
+        .sort({ createdAt: -1 })
         .populate({
             path: 'lineItems.productId',
             populate: { path: 'categoryId', select: 'name translations' },
@@ -259,12 +294,46 @@ orderCtlr.getMyRestaurantOrders = async ({ params: { guestId, restaurantId } }) 
         })
         .populate('restaurantId', 'name address')
         .populate('tableId', 'tableNumber');
-    
-    if(!orders || orders.length === 0) {
-        return { message: "No orders found for this restaurant", data: null }
-    } else {
-        return { data: orders }
+
+    if (!orders || orders.length === 0) {
+        return { message: "No orders found for today", data: null };
     }
+    return { data: orders };
+}
+
+// Delete all orders for a guest in a restaurant that are NOT in today's business-day window
+orderCtlr.deletePreviousMyRestaurantOrders = async ({ params: { guestId, restaurantId } }) => {
+    if (!restaurantId || !mongoose.Types.ObjectId.isValid(restaurantId)) {
+        throw { status: 400, message: "Valid Restaurant ID is required" };
+    }
+
+    const restaurant = await Restaurant.findById(restaurantId);
+    if (!restaurant) throw { status: 404, message: "Restaurant not found" };
+
+    const operatingHours = restaurant.operatingHours || {
+        openingTime: "00:00",
+        closingTime: "23:59",
+        timezone: "Asia/Dubai"
+    };
+
+    const now = new Date();
+    const { startDate, endDate } = getBusinessDayBoundaries(operatingHours, now);
+
+    // Delete orders outside the current business-day window
+    const deleteResult = await Order.deleteMany({
+        guestId: guestId,
+        restaurantId: restaurantId,
+        $or: [
+            { createdAt: { $lt: startDate } },
+            { createdAt: { $gt: endDate } }
+        ]
+    });
+
+    return {
+        success: true,
+        deletedCount: deleteResult?.deletedCount || 0,
+        message: `Removed ${deleteResult?.deletedCount || 0} previous orders outside today's business window`
+    };
 }
 
 orderCtlr.show = async ({ params: { orderId } }) => {
