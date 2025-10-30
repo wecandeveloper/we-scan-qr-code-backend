@@ -152,6 +152,14 @@ orderCtlr.accept = async ({ body }) => {
         message: "Your order has been accepted!"
     });
 
+    // Notify all restaurant dashboards to stop any pending order request notifications
+    socketService.emitToRestaurant(orderDetails.restaurantId, 'order_request_resolved', {
+        restaurantId: orderDetails.restaurantId,
+        guestId: orderDetails.guestId,
+        status: 'accepted',
+        orderNo: orderDetails.orderNo
+    });
+
     return { success: true, message: "Order accepted and created successfully.", data: newOrder };
 };
 
@@ -162,6 +170,13 @@ orderCtlr.decline = async ({ body }) => {
     socketService.emitCustomerNotification(orderDetails.guestId, {
         status: "declined",
         message: "Sorry, your order has been declined by the restaurant."
+    });
+
+    // Notify all restaurant dashboards to stop any pending order request notifications
+    socketService.emitToRestaurant(orderDetails.restaurantId, 'order_request_resolved', {
+        restaurantId: orderDetails.restaurantId,
+        guestId: orderDetails.guestId,
+        status: 'declined'
     });
 
     return { success: true, message: "Order declined successfully." };

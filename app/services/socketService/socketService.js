@@ -74,7 +74,19 @@ module.exports = {
             console.warn("Socket.IO not initialized!");
             return;
         }
-        io.emit("call-waiter", data);
+        try {
+            const roomName = data?.restaurantId ? `restaurant_${data.restaurantId}` : null;
+            console.log("📣 Emitting call-waiter:", { roomName, payload: data });
+            if (roomName) {
+                const roomSize = io.sockets.adapter.rooms.get(roomName)?.size || 0;
+                console.log(`👥 Clients in ${roomName}: ${roomSize}`);
+                io.to(roomName).emit("call-waiter", data);
+            } else {
+                io.emit("call-waiter", data);
+            }
+        } catch (err) {
+            console.error("Failed to emit call-waiter:", err);
+        }
     },
 
     // Emit customer notifications

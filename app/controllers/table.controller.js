@@ -20,35 +20,72 @@ tableCtlr.listByRestaurant = async ({ params: { restaurantId } }) => {
 };
 
 tableCtlr.callWaiter = async ({ body }) => {
-    const { tableId, restaurantId } = body;
-    // console.log(body)
+    const { tableId, restaurantId, orderType, deliveryAddress } = body;
 
-    if (!tableId || !restaurantId) {
-        throw new Error("Table number and restaurant ID are required");
+    if (!restaurantId) {
+        throw new Error("Restaurant ID is required");
     }
 
-    // Optional: Verify table exists in DB
-    const table = await Table.findOne({ _id: tableId, restaurantId: restaurantId });
-    if (!table) {
-        throw new Error("Table not found");
+    if (orderType === 'Dine-In') {
+        if (!tableId) {
+            throw new Error("Table ID is required for Dine-In waiter call");
+        }
+
+        // Verify table exists in DB
+        const table = await Table.findOne({ _id: tableId, restaurantId: restaurantId });
+        if (!table) {
+            throw new Error("Table not found");
+        }
+
+        const data = {
+            orderType: 'Dine-In',
+            tableNo: table.tableNumber,
+            restaurantId,
+            message: `Waiter requested at Table ${table.tableNumber}`,
+            timestamp: new Date(),
+        };
+
+        socketService.emitCallWaiter(data);
+
+        return {
+            success: true,
+            message: "Waiter called successfully",
+            data,
+        };
     }
 
-    // Prepare data for waiter notification
-    const data = {
-        tableNo: table.tableNumber,
-        restaurantId,
-        message: `Waiter requested at Table ${table.tableNumber}`,
-        timestamp: new Date(),
-    };
+    if (orderType === 'Take-Away') {
+        // Expect deliveryAddress with name, phone, and optionally vehicleNo
+        const customerName = deliveryAddress?.name;
+        const customerPhone = deliveryAddress?.phone?.countryCode && deliveryAddress?.phone?.number
+            ? `${deliveryAddress.phone.countryCode}${deliveryAddress.phone.number}`
+            : undefined;
+        const vehicleNo = deliveryAddress?.vehicleNo;
 
-    // Emit to restaurant admins
-    socketService.emitCallWaiter(data);
+        if (!customerName || !customerPhone) {
+            throw new Error("Customer name and phone are required for Take-Away waiter call");
+        }
 
-    return {
-        success: true,
-        message: "Waiter called successfully",
-        data,
-    };
+        const data = {
+            orderType: 'Take-Away',
+            restaurantId,
+            customerName,
+            customerPhone,
+            vehicleNo,
+            message: `Take-Away customer needs assistance` + (vehicleNo ? ` • Vehicle: ${vehicleNo}` : ''),
+            timestamp: new Date(),
+        };
+
+        socketService.emitCallWaiter(data);
+
+        return {
+            success: true,
+            message: "Waiter called successfully",
+            data,
+        };
+    }
+
+    throw new Error("Unsupported order type for waiter call");
 };
 
 
