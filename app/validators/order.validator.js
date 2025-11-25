@@ -2,6 +2,7 @@ const { Types } = require('mongoose');
 const Restaurant = require('../models/restaurant.model');
 const Table = require('../models/table.model');
 const Product = require('../models/product.model');
+const CommonAddOn = require('../models/commonAddOn.model');
 
 const orderValidationSchema = {
     restaurantId: {
@@ -41,27 +42,70 @@ const orderValidationSchema = {
     //     },
     // },
     lineItems: {
+        optional: true, // Optional since we can have addOnsLineItems only
         isArray: {
             errorMessage: "Line items must be an array",
         },
         custom: {
-            options: async (lineItems) => {
-                if (!lineItems.length) {
-                    throw new Error("At least one line item is required");
+            options: async (lineItems, { req }) => {
+                // If lineItems is provided, validate it
+                if (lineItems && lineItems.length > 0) {
+                    for (const item of lineItems) {
+                        // Validate quantity for all items
+                        if (typeof item.quantity !== 'number' || item.quantity <= 0) {
+                            throw new Error("Quantity must be a positive number");
+                        }
+
+                        // All items in lineItems must be products (no common addOns here)
+                        if (!Types.ObjectId.isValid(item.productId)) {
+                            throw new Error("Invalid product ID in line items");
+                        }
+
+                        const product = await Product.findById(item.productId);
+                        if (!product) {
+                            throw new Error(`Product not found for ID: ${item.productId}`);
+                        }
+                    }
+                }
+                
+                // Check that at least one of lineItems or addOnsLineItems has items
+                const addOnsLineItems = req.body.addOnsLineItems || [];
+                if ((!lineItems || lineItems.length === 0) && (!addOnsLineItems || addOnsLineItems.length === 0)) {
+                    throw new Error("At least one item is required (either in lineItems or addOnsLineItems)");
                 }
 
-                for (const item of lineItems) {
-                    if (!item.productId || !Types.ObjectId.isValid(item.productId)) {
-                        throw new Error("Invalid product ID in line items");
-                    }
+                return true;
+            },
+        },
+    },
+    addOnsLineItems: {
+        optional: true, // Optional since we can have lineItems only
+        isArray: {
+            errorMessage: "Add-ons line items must be an array",
+        },
+        custom: {
+            options: async (addOnsLineItems) => {
+                // If addOnsLineItems is provided, validate it
+                if (addOnsLineItems && addOnsLineItems.length > 0) {
+                    for (const item of addOnsLineItems) {
+                        // Validate quantity
+                        if (typeof item.quantity !== 'number' || item.quantity <= 0) {
+                            throw new Error("Quantity must be a positive number for add-on items");
+                        }
 
-                    const product = await Product.findById(item.productId);
-                    if (!product) {
-                        throw new Error(`Product not found for ID: ${item.productId}`);
-                    }
-
-                    if (typeof item.quantity !== 'number' || item.quantity <= 0) {
-                        throw new Error("Quantity must be a positive number");
+                        // Validate common addOn name
+                        if (!item.commonAddOnName || typeof item.commonAddOnName !== 'string') {
+                            throw new Error("Common addOn name is required for add-on items");
+                        }
+                        
+                        const commonAddOn = await CommonAddOn.findOne({ 
+                            name: item.commonAddOnName, 
+                            isAvailable: true 
+                        });
+                        
+                        if (!commonAddOn) {
+                            throw new Error(`Invalid or unavailable common addOn "${item.commonAddOnName}"`);
+                        }
                     }
                 }
 

@@ -7,9 +7,79 @@ const Table = require('../models/table.model');
 const User = require('../models/user.model');
 const Restaurant = require('../models/restaurant.model');
 const Counter = require("../models/counter.model");
+const CommonAddOn = require('../models/commonAddOn.model');
+const Payment = require('../models/payment.model');
 const socketService = require('../services/socketService/socketService');
 const { getBusinessDayBoundaries, getBusinessWeekBoundaries, getBusinessMonthBoundaries } = require('../utils/timezoneUtils');
 // const Address = require('../models/address.model')
+
+/**
+ * Calculate line item price - supports both old and new formats
+ * @param {Object} lineItem - Line item from order
+ * @param {Object} product - Product document
+ * @returns {Object} - Updated line item with calculated prices
+ */
+function calculateLineItemPrice(lineItem, product) {
+    // Check if new format is being used (has selectedSize, productAddOns, or commonAddOns)
+    const isNewFormat = lineItem.selectedSize || 
+                       (lineItem.productAddOns && lineItem.productAddOns.length > 0) || 
+                       (lineItem.commonAddOns && lineItem.commonAddOns.length > 0);
+
+    if (!isNewFormat) {
+        // OLD FORMAT - Backward compatibility
+        // Use existing logic: product.offerPrice or product.price
+        const itemPrice = product.offerPrice && product.offerPrice > 0 ? product.offerPrice : product.price;
+        return {
+            ...lineItem,
+            price: itemPrice,
+            basePrice: itemPrice,
+            itemSubtotal: itemPrice,
+            itemTotal: itemPrice * (lineItem.quantity || 1)
+        };
+    }
+
+    // NEW FORMAT - Calculate with sizes and addOns
+    let basePrice = 0;
+
+    // Determine base price: selected size price OR product base price
+    if (lineItem.selectedSize && lineItem.selectedSize.price !== undefined) {
+        // Product has sizes and size is selected
+        basePrice = lineItem.selectedSize.price;
+    } else {
+        // No size selected or product has no sizes - use product price
+        // Apply offer price if available
+        basePrice = product.offerPrice && product.offerPrice > 0 ? product.offerPrice : product.price;
+    }
+
+    // Calculate addOns total
+    let productAddOnsTotal = 0;
+    if (lineItem.productAddOns && Array.isArray(lineItem.productAddOns)) {
+        productAddOnsTotal = lineItem.productAddOns.reduce((sum, addOn) => {
+            return sum + (parseFloat(addOn.price) || 0);
+        }, 0);
+    }
+
+    let commonAddOnsTotal = 0;
+    if (lineItem.commonAddOns && Array.isArray(lineItem.commonAddOns)) {
+        commonAddOnsTotal = lineItem.commonAddOns.reduce((sum, addOn) => {
+            return sum + (parseFloat(addOn.price) || 0);
+        }, 0);
+    }
+
+    // Calculate totals
+    const itemSubtotal = basePrice + productAddOnsTotal + commonAddOnsTotal;
+    const quantity = parseFloat(lineItem.quantity) || 1;
+    const itemTotal = itemSubtotal * quantity;
+
+    return {
+        ...lineItem,
+        basePrice: basePrice,
+        itemSubtotal: itemSubtotal,
+        itemTotal: itemTotal,
+        // Keep legacy price field for backward compatibility
+        price: itemSubtotal
+    };
+}
 
 async function getOrCreateGuestId(body) {
     let guestId = body.guestId;
@@ -44,22 +114,188 @@ orderCtlr.create = async ({ body }) => {
     orderObj.restaurantId = body.restaurantId;
     orderObj.guestId = await getOrCreateGuestId(body);
 
+    // Check if payment is enabled for this restaurant
+    const Restaurant = require('../models/restaurant.model');
+    const restaurant = await Restaurant.findById(orderObj.restaurantId);
+    
+    // If payment is enabled, check payment option
+    // For pay_later/cash_on_delivery: Allow order creation (will go through accept/decline)
+    // For pay_now: Block (should go through payment API)
+    if (restaurant?.paymentSettings?.isPaymentEnabled) {
+        // Check if this is a pay_later or cash_on_delivery order
+        // These should go through the old accept/decline flow
+        const isPayLater = orderObj.paymentOption === 'pay_later' || orderObj.paymentOption === 'cash_on_delivery';
+        
+        if (!isPayLater) {
+            // For pay_now orders, they must go through payment API
+            // Check for recent orders/payments to provide better error messages
+            const recentOrder = await Order.findOne({
+                restaurantId: orderObj.restaurantId,
+                guestId: orderObj.guestId
+            }).sort({ createdAt: -1 });
+            
+            if (recentOrder && recentOrder.createdAt) {
+                const timeDiff = Date.now() - new Date(recentOrder.createdAt).getTime();
+                if (timeDiff < 10 * 60 * 1000) { // 10 minutes
+                    throw { 
+                        status: 400, 
+                        message: "Order already created. Please check your orders or wait a moment before trying again." 
+                    };
+                }
+            }
+            
+            // Check for recent payment records
+            const Payment = require('../models/payment.model');
+            const recentPayment = await Payment.findOne({
+                restaurantId: orderObj.restaurantId,
+                guestId: orderObj.guestId,
+                paymentStatus: { $in: ['pending', 'paid'] }
+            }).sort({ createdAt: -1 });
+            
+            if (recentPayment && recentPayment.createdAt) {
+                const timeDiff = Date.now() - new Date(recentPayment.createdAt).getTime();
+                if (timeDiff < 10 * 60 * 1000) { // 10 minutes
+                    if (recentPayment.orderId) {
+                        const existingOrder = await Order.findById(recentPayment.orderId);
+                        if (existingOrder) {
+                            throw { 
+                                status: 400, 
+                                message: "Order already created through payment system. Please check your orders." 
+                            };
+                        }
+                    }
+                }
+            }
+            
+            // Block pay_now orders from using this endpoint
+            throw { 
+                status: 403, 
+                message: "Payment is enabled for this restaurant. Pay Now orders must be placed through the payment system. Please use the payment option in your cart." 
+            };
+        }
+        // For pay_later/cash_on_delivery, allow order creation (will go through accept/decline flow)
+    }
+
     // Basic validations
     if (!orderObj.restaurantId) throw { status: 400, message: "Restaurant ID is required" };
-    if (!orderObj.lineItems || orderObj.lineItems.length === 0)
-        throw { status: 400, message: "At least one product is required" };
+    if ((!orderObj.lineItems || orderObj.lineItems.length === 0) && (!orderObj.addOnsLineItems || orderObj.addOnsLineItems.length === 0))
+        throw { status: 400, message: "At least one item is required" };
     if (!orderObj.orderType) throw { status: 400, message: "Order type is required" };
 
-    // Validate Products
+    // Separate common addOns from lineItems into addOnsLineItems
+    const addOnsLineItems = [];
+    const productLineItems = [];
+    
+    // Process lineItems - separate common addOns from products
+    for (let i = 0; i < (orderObj.lineItems || []).length; i++) {
+        const lineItem = orderObj.lineItems[i];
+        
+        // Handle common addOn items (no productId)
+        if (!lineItem.productId || lineItem.isCommonAddOn || lineItem.commonAddOnName) {
+            // Validate common addOn
+            if (lineItem.commonAddOnName) {
+                const commonAddOn = await CommonAddOn.findOne({ 
+                    name: lineItem.commonAddOnName, 
+                    isAvailable: true 
+                });
+                if (!commonAddOn) {
+                    throw { status: 400, message: `Invalid or unavailable common addOn "${lineItem.commonAddOnName}"` };
+                }
+                // Add to addOnsLineItems
+                addOnsLineItems.push({
+                    commonAddOnName: lineItem.commonAddOnName,
+                    quantity: lineItem.quantity || 1,
+                    price: commonAddOn.price,
+                    basePrice: commonAddOn.price,
+                    itemSubtotal: commonAddOn.price,
+                    itemTotal: (commonAddOn.price || 0) * (lineItem.quantity || 1)
+                });
+            }
+            // Skip product validation for common addOns
+            continue;
+        }
+        
+        // Add product items to productLineItems
+        productLineItems.push(lineItem);
+    }
+    
+    // Also process addOnsLineItems if sent separately
+    if (orderObj.addOnsLineItems && Array.isArray(orderObj.addOnsLineItems)) {
+        for (const addOnItem of orderObj.addOnsLineItems) {
+            const commonAddOn = await CommonAddOn.findOne({ 
+                name: addOnItem.commonAddOnName, 
+                isAvailable: true 
+            });
+            if (!commonAddOn) {
+                throw { status: 400, message: `Invalid or unavailable common addOn "${addOnItem.commonAddOnName}"` };
+            }
+            addOnsLineItems.push({
+                commonAddOnName: addOnItem.commonAddOnName,
+                quantity: addOnItem.quantity || 1,
+                price: commonAddOn.price,
+                basePrice: commonAddOn.price,
+                itemSubtotal: commonAddOn.price,
+                itemTotal: (commonAddOn.price || 0) * (addOnItem.quantity || 1)
+            });
+        }
+    }
+    
+    // Update orderObj with separated items
+    orderObj.lineItems = productLineItems;
+    orderObj.addOnsLineItems = addOnsLineItems;
+
+    // Validate Products and calculate prices
     for (let i = 0; i < orderObj.lineItems.length; i++) {
-        const product = await Product.findById(orderObj.lineItems[i].productId);
+        const lineItem = orderObj.lineItems[i];
+        
+        const product = await Product.findById(lineItem.productId);
+        
         if (!product || !product.isAvailable) {
             throw { status: 400, message: "Invalid or Unavailable product in lineItems" };
         } else if (String(product.restaurantId) !== String(orderObj.restaurantId)) {
             throw { status: 400, message: "Product does not belong to this restaurant" };
         }
-        const itemPrice = product.offerPrice && product.offerPrice > 0 ? product.offerPrice : product.price;
-        orderObj.lineItems[i].price = itemPrice;
+
+        // Validate sizes if provided
+        if (lineItem.selectedSize) {
+            const validSize = product.sizes && product.sizes.find(
+                s => s.name === lineItem.selectedSize.name && s.isAvailable
+            );
+            if (!validSize) {
+                throw { status: 400, message: `Invalid or unavailable size "${lineItem.selectedSize.name}" for product ${product.name}` };
+            }
+            // Update selectedSize with correct price from product
+            lineItem.selectedSize.price = validSize.price;
+        } else if (product.sizes && product.sizes.length > 0) {
+            // If product has sizes but none selected, use first available size as default
+            const defaultSize = product.sizes.find(s => s.isAvailable) || product.sizes[0];
+            if (defaultSize) {
+                lineItem.selectedSize = {
+                    name: defaultSize.name,
+                    price: defaultSize.price
+                };
+            }
+        }
+
+        // Validate product-specific addOns if provided
+        if (lineItem.productAddOns && Array.isArray(lineItem.productAddOns)) {
+            for (const selectedAddOn of lineItem.productAddOns) {
+                const validAddOn = product.addOns && product.addOns.find(
+                    a => a.name === selectedAddOn.name && a.isAvailable
+                );
+                if (!validAddOn) {
+                    throw { status: 400, message: `Invalid or unavailable addOn "${selectedAddOn.name}" for product ${product.name}` };
+                }
+                // Update addOn with correct price from product
+                selectedAddOn.price = validAddOn.price;
+            }
+        }
+
+        // Note: Common addOns are now handled separately in addOnsLineItems
+        // Product-specific addOns remain in productAddOns field
+
+        // Calculate prices using helper function
+        orderObj.lineItems[i] = calculateLineItemPrice(lineItem, product);
     }
 
     let table;
@@ -77,12 +313,44 @@ orderCtlr.create = async ({ body }) => {
         if (!orderObj.deliveryAddress) throw { status: 400, message: "Delivery address is required" };
     }
 
-    // Calculate total amount
-    orderObj.totalAmount = (orderObj.lineItems || []).reduce((acc, item) => {
+    // Calculate total amount - support both old and new formats
+    // Include both lineItems and addOnsLineItems
+    let totalAmount = 0;
+    
+    // Calculate from product lineItems
+    totalAmount += (orderObj.lineItems || []).reduce((acc, item) => {
+        // Use itemTotal if available (new format), otherwise fall back to old calculation
+        if (item.itemTotal !== undefined) {
+            return acc + item.itemTotal;
+        }
+        // Old format fallback
         const quantity = parseFloat(item.quantity) || 0;
         const price = parseFloat(item.price) || 0;
         return acc + quantity * price;
     }, 0);
+    
+    // Calculate from addOnsLineItems
+    totalAmount += (orderObj.addOnsLineItems || []).reduce((acc, item) => {
+        if (item.itemTotal !== undefined) {
+            return acc + item.itemTotal;
+        }
+        const quantity = parseFloat(item.quantity) || 0;
+        const price = parseFloat(item.price) || 0;
+        return acc + quantity * price;
+    }, 0);
+    
+    orderObj.totalAmount = totalAmount;
+
+    // If payment is enabled and this is a pay_later/cash_on_delivery order, set payment fields
+    // (but don't create payment record - that will be done after acceptance if needed)
+    if (restaurant?.paymentSettings?.isPaymentEnabled) {
+        if (orderObj.paymentOption === 'pay_later' || orderObj.paymentOption === 'cash_on_delivery') {
+            // Set payment fields on order (no paymentId yet - will be set after acceptance if needed)
+            orderObj.paymentOption = orderObj.paymentOption;
+            orderObj.paymentStatus = 'pending';
+            orderObj.isPaid = false;
+        }
+    }
 
     // Populate product details for the notification
     const populatedOrderDetails = {
@@ -96,7 +364,9 @@ orderCtlr.create = async ({ body }) => {
                 ...item,
                 productId: product
             };
-        }))
+        })),
+        // addOnsLineItems don't need product population
+        addOnsLineItems: orderObj.addOnsLineItems || []
     };
 
     // Emit notification via Socket.IO for restaurant approval
@@ -124,6 +394,48 @@ orderCtlr.create = async ({ body }) => {
 orderCtlr.accept = async ({ body }) => {
     const { orderDetails } = body;
 
+    // Check if this is a paid order (already created, cannot be accepted/declined)
+    const existingPaidOrder = await Order.findOne({
+        restaurantId: orderDetails.restaurantId,
+        guestId: orderDetails.guestId,
+        isPaid: true,
+        status: 'Order Received'
+    }).sort({ createdAt: -1 });
+
+    if (existingPaidOrder) {
+        throw { 
+            status: 400, 
+            message: "This order has already been paid and created. Paid orders cannot be accepted or declined." 
+        };
+    }
+
+    // Check if there's a payment record for this order that's already paid
+    const payment = await Payment.findOne({
+        restaurantId: orderDetails.restaurantId,
+        guestId: orderDetails.guestId,
+        paymentStatus: 'paid'
+    }).sort({ createdAt: -1 });
+
+    if (payment && payment.orderId) {
+        // Order already created from payment
+        const existingOrder = await Order.findById(payment.orderId)
+            .populate({ 
+                path: "lineItems.productId", 
+                select: ["name", "images", "price", "offerPrice", "translations"], 
+                populate: { path: "categoryId", select: ["name", "translations"] } 
+            })
+            .populate("restaurantId", "name address")
+            .populate("tableId", "tableNumber");
+
+        if (existingOrder) {
+            throw { 
+                status: 400, 
+                message: "This order has already been paid and created. Paid orders cannot be accepted or declined.",
+                data: existingOrder
+            };
+        }
+    }
+
     // Generate unique order number per restaurant
     const counter = await Counter.findOneAndUpdate(
         { restaurantId: orderDetails.restaurantId },
@@ -132,6 +444,18 @@ orderCtlr.accept = async ({ body }) => {
     );
 
     orderDetails.orderNo = `O${counter.seq}`;
+    
+    // ✅ Ensure status is set to 'Order Received' (valid enum value)
+    // Remove any invalid status like 'requested' that might be in orderDetails
+    orderDetails.status = 'Order Received';
+
+    // If this is a pay_later or cash_on_delivery order, ensure payment fields are set
+    // (No paymentId - payment record is not created for pay_later orders)
+    if (orderDetails.paymentOption === 'pay_later' || orderDetails.paymentOption === 'cash_on_delivery') {
+        orderDetails.paymentStatus = 'pending';
+        orderDetails.isPaid = false;
+        // paymentId remains null/undefined for pay_later orders
+    }
 
     // Create the actual order in DB
     const order = await Order.create(orderDetails);
@@ -143,7 +467,8 @@ orderCtlr.accept = async ({ body }) => {
             populate: { path: "categoryId", select: ["name", "translations"] } 
         })
         .populate("restaurantId", "name address")
-        .populate("tableId", "tableNumber");
+        .populate("tableId", "tableNumber")
+        .populate('paymentId', 'paymentStatus paymentOption gateway transactionID');
 
     // Notify customer that order was accepted
     socketService.emitCustomerNotification(orderDetails.guestId, {
@@ -165,6 +490,39 @@ orderCtlr.accept = async ({ body }) => {
 
 orderCtlr.decline = async ({ body }) => {
     const { orderDetails } = body;
+
+    // Check if this is a paid order (cannot be declined)
+    const existingPaidOrder = await Order.findOne({
+        restaurantId: orderDetails.restaurantId,
+        guestId: orderDetails.guestId,
+        isPaid: true,
+        status: 'Order Received'
+    }).sort({ createdAt: -1 });
+
+    if (existingPaidOrder) {
+        throw { 
+            status: 400, 
+            message: "This order has already been paid. Paid orders cannot be declined." 
+        };
+    }
+
+    // Check if there's a payment record for this order that's already paid
+    const payment = await Payment.findOne({
+        restaurantId: orderDetails.restaurantId,
+        guestId: orderDetails.guestId,
+        paymentStatus: 'paid'
+    }).sort({ createdAt: -1 });
+
+    if (payment && payment.orderId) {
+        // Order already created from payment
+        const existingOrder = await Order.findById(payment.orderId);
+        if (existingOrder) {
+            throw { 
+                status: 400, 
+                message: "This order has already been paid and created. Paid orders cannot be declined." 
+            };
+        }
+    }
 
     // Notify customer that order was declined
     socketService.emitCustomerNotification(orderDetails.guestId, {
@@ -190,7 +548,8 @@ orderCtlr.listAllOrders = async () => {
             select: ['name', 'price', 'offerPrice', 'images', 'translations']
         })
         .populate('restaurantId', 'name address')
-        .populate('tableId', 'tableNumber');
+        .populate('tableId', 'tableNumber')
+        .populate('paymentId', 'paymentStatus paymentOption gateway transactionID');
     if(!orders || orders.length === 0) {
         return { message: "No orders found", data: null }
     } else {
@@ -244,7 +603,8 @@ orderCtlr.listRestaurantOrders = async ({ user, query }) => {
             select: ['name', 'price', 'offerPrice', 'images', 'translations']
         })
         .populate("restaurantId", "name address")
-        .populate("tableId", "tableNumber");
+        .populate("tableId", "tableNumber")
+        .populate('paymentId', 'paymentStatus paymentOption gateway transactionID');
 
     if (!orders || orders.length === 0) return { message: "No orders found", data: null };
     return { data: orders };
@@ -258,7 +618,8 @@ orderCtlr.getMyOrders = async ({ params: { guestId } }) => {
             select: ['name', 'price', 'offerPrice', 'images', 'translations']
         })
         .populate('restaurantId', 'name address')
-        .populate('tableId', 'tableNumber');
+        .populate('tableId', 'tableNumber')
+        .populate('paymentId', 'paymentStatus paymentOption gateway transactionID');
     if(!orders || orders.length === 0) {
         return { message: "No orders found", data: null }
     } else {
@@ -308,7 +669,8 @@ orderCtlr.getMyRestaurantOrders = async ({ params: { guestId, restaurantId } }) 
             select: ['name', 'price', 'offerPrice', 'images', 'translations']
         })
         .populate('restaurantId', 'name address')
-        .populate('tableId', 'tableNumber');
+        .populate('tableId', 'tableNumber')
+        .populate('paymentId', 'paymentStatus paymentOption gateway transactionID');
 
     if (!orders || orders.length === 0) {
         return { message: "No orders found for today", data: null };
@@ -363,7 +725,8 @@ orderCtlr.show = async ({ params: { orderId } }) => {
             select: ['name', 'price', 'offerPrice', 'images', 'translations']
         })
         .populate('restaurantId', 'name address')
-        .populate('tableId', 'tableNumber');
+        .populate('tableId', 'tableNumber')
+        .populate('paymentId', 'paymentStatus paymentOption gateway transactionID');
 
     if(!order) {
         return { message: "No Order found"};
@@ -392,7 +755,8 @@ orderCtlr.cancelOrder = async ({ params: { orderId, guestId }, body }) => {
             select: ['name', 'price', 'offerPrice', 'images', 'translations']
         })
         .populate('restaurantId', 'name address')
-        .populate('tableId', 'tableNumber');
+        .populate('tableId', 'tableNumber')
+        .populate('paymentId', 'paymentStatus paymentOption gateway transactionID');
 
     if (!cancelledOrder) {
         return { message: "No Order found", data: null };
@@ -440,7 +804,10 @@ orderCtlr.changeStatus = async ({ params: { orderId }, user, body }) => {
     }
 
     const updatedBody = pick(body, ['status']);
-    const updatedOrder = await Order.findByIdAndUpdate(orderId, updatedBody, { new: true }).populate('restaurantId', 'name address').populate('tableId', 'tableNumber');
+    const updatedOrder = await Order.findByIdAndUpdate(orderId, updatedBody, { new: true })
+        .populate('restaurantId', 'name address')
+        .populate('tableId', 'tableNumber')
+        .populate('paymentId', 'paymentStatus paymentOption gateway transactionID');
 
     console.log('🚨 Updated Order:', updatedOrder);
 

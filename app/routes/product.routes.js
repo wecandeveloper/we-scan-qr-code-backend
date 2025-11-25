@@ -6,7 +6,7 @@ const { authenticateUser, authorizeUser } = require('../middlewares/auth');
 const setupRoutes = require('./route.util');
 const { checkSchema } = require('express-validator');
 // const categoryValidationSchema = require('../validators/product.validator');
-const upload = require('../services/cloudinaryService/cloudinary.multer');
+const upload = require('../services/unifiedUploader/unified.multer');
 const productValidationSchema = require('../validators/product.validator');
 
 const routes = [

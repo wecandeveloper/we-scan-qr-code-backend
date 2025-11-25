@@ -29,7 +29,71 @@ const orderSchema = new Schema({
                 ref: 'Product'
             },
             quantity: Number,
-            price: Number
+            // Legacy field - kept for backward compatibility
+            // If new fields are present, this will be calculated from basePrice + addOns
+            price: {
+                type: Number,
+                required: false // Made optional to support new structure
+            },
+            // NEW FIELDS (all optional for backward compatibility)
+            comments: {
+                type: String,
+                default: ""
+            },
+            // Selected size (if product has sizes)
+            selectedSize: {
+                name: String,
+                price: Number
+            },
+            // Product-specific addOns
+            productAddOns: [
+                {
+                    name: String,
+                    price: Number
+                }
+            ],
+            // Calculated fields
+            basePrice: {
+                type: Number,
+                required: false // Will be calculated: product price OR selected size price
+            },
+            itemSubtotal: {
+                type: Number,
+                required: false // basePrice + all addOn prices
+            },
+            itemTotal: {
+                type: Number,
+                required: false // itemSubtotal × quantity
+            }
+        }
+    ],
+    // Separate line items for common addOns (global addOns)
+    addOnsLineItems: [
+        {
+            commonAddOnName: {
+                type: String,
+                required: true
+            },
+            quantity: {
+                type: Number,
+                required: true
+            },
+            price: {
+                type: Number,
+                required: true
+            },
+            basePrice: {
+                type: Number,
+                required: false
+            },
+            itemSubtotal: {
+                type: Number,
+                required: false
+            },
+            itemTotal: {
+                type: Number,
+                required: false
+            }
         }
     ],
     totalAmount: Number,
@@ -46,6 +110,27 @@ const orderSchema = new Schema({
             'Cancelled'
         ],
         default: "Order Received"
+    },
+    // Payment-related fields
+    paymentId: {
+        type: Schema.Types.ObjectId,
+        ref: 'Payment',
+        default: null
+    },
+    paymentStatus: {
+        type: String,
+        enum: ['pending', 'paid', 'failed', 'refunded', null],
+        default: null
+    },
+    paymentOption: {
+        type: String,
+        enum: ['pay_now', 'pay_later', 'cash_on_delivery', null],
+        default: null
+    },
+    // Flag to indicate if order was paid (cannot be declined)
+    isPaid: {
+        type: Boolean,
+        default: false
     },
     orderDate: {
         type: Date,

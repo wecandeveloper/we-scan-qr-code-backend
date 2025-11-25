@@ -2,7 +2,7 @@ const { default: mongoose } = require("mongoose");
 const Product = require("../models/product.model");
 const Store = require("../models/restaurant.model");
 const Category = require("../models/category.model");
-const { processMultipleImageBuffers, deleteCloudinaryImages, getBufferHash, uploadImageBuffer } = require("../services/cloudinaryService/cloudinary.uploader");
+const { processMultipleImageBuffers, deleteImages, getBufferHash, uploadImageBuffer } = require("../services/unifiedUploader/unified.uploader");
 const User = require("../models/user.model");
 const Restaurant = require("../models/restaurant.model");
 
@@ -82,9 +82,66 @@ productCtlr.create = async ({ body, files, user }) => {
         }
     }
 
+    // Parse sizes if provided
+    let sizes = [];
+    if (body.sizes) {
+        try {
+            const sizesArray = typeof body.sizes === 'string' 
+                ? JSON.parse(body.sizes) 
+                : body.sizes;
+            
+            sizes = sizesArray.map(size => {
+                const sizeTranslations = new Map();
+                if (size.translations) {
+                    for (const [lang, name] of Object.entries(size.translations)) {
+                        sizeTranslations.set(lang, name);
+                    }
+                }
+                return {
+                    name: size.name,
+                    price: parseFloat(size.price) || 0,
+                    isDefault: size.isDefault || false,
+                    isAvailable: size.isAvailable !== undefined ? size.isAvailable : true,
+                    translations: sizeTranslations
+                };
+            });
+        } catch (error) {
+            console.error('Error parsing sizes:', error);
+        }
+    }
+
+    // Parse addOns if provided
+    let addOns = [];
+    if (body.addOns) {
+        try {
+            const addOnsArray = typeof body.addOns === 'string' 
+                ? JSON.parse(body.addOns) 
+                : body.addOns;
+            
+            addOns = addOnsArray.map(addOn => {
+                const addOnTranslations = new Map();
+                if (addOn.translations) {
+                    for (const [lang, name] of Object.entries(addOn.translations)) {
+                        addOnTranslations.set(lang, name);
+                    }
+                }
+                return {
+                    name: addOn.name,
+                    price: parseFloat(addOn.price) || 0,
+                    isAvailable: addOn.isAvailable !== undefined ? addOn.isAvailable : true,
+                    translations: addOnTranslations
+                };
+            });
+        } catch (error) {
+            console.error('Error parsing addOns:', error);
+        }
+    }
+
     const product = new Product({
         ...body,
         translations,
+        sizes,
+        addOns,
         price,
         discountPercentage,
         offerPrice,
@@ -239,9 +296,74 @@ productCtlr.update = async ({ params: { productId }, body, files, user }) => {
         }
     }
 
+    // Parse sizes if provided
+    let sizes = existingProduct.sizes || [];
+    if (body.sizes !== undefined) {
+        try {
+            if (body.sizes === null || body.sizes === '') {
+                sizes = [];
+            } else {
+                const sizesArray = typeof body.sizes === 'string' 
+                    ? JSON.parse(body.sizes) 
+                    : body.sizes;
+                
+                sizes = sizesArray.map(size => {
+                    const sizeTranslations = new Map();
+                    if (size.translations) {
+                        for (const [lang, name] of Object.entries(size.translations)) {
+                            sizeTranslations.set(lang, name);
+                        }
+                    }
+                    return {
+                        name: size.name,
+                        price: parseFloat(size.price) || 0,
+                        isDefault: size.isDefault || false,
+                        isAvailable: size.isAvailable !== undefined ? size.isAvailable : true,
+                        translations: sizeTranslations
+                    };
+                });
+            }
+        } catch (error) {
+            console.error('Error parsing sizes:', error);
+        }
+    }
+
+    // Parse addOns if provided
+    let addOns = existingProduct.addOns || [];
+    if (body.addOns !== undefined) {
+        try {
+            if (body.addOns === null || body.addOns === '') {
+                addOns = [];
+            } else {
+                const addOnsArray = typeof body.addOns === 'string' 
+                    ? JSON.parse(body.addOns) 
+                    : body.addOns;
+                
+                addOns = addOnsArray.map(addOn => {
+                    const addOnTranslations = new Map();
+                    if (addOn.translations) {
+                        for (const [lang, name] of Object.entries(addOn.translations)) {
+                            addOnTranslations.set(lang, name);
+                        }
+                    }
+                    return {
+                        name: addOn.name,
+                        price: parseFloat(addOn.price) || 0,
+                        isAvailable: addOn.isAvailable !== undefined ? addOn.isAvailable : true,
+                        translations: addOnTranslations
+                    };
+                });
+            }
+        } catch (error) {
+            console.error('Error parsing addOns:', error);
+        }
+    }
+
     const updateData = { 
         ...body,
-        translations
+        translations,
+        sizes,
+        addOns
     };
 
     // Optional: Handle Category validation if provided
@@ -263,10 +385,11 @@ productCtlr.update = async ({ params: { productId }, body, files, user }) => {
 
         const newImages = await processMultipleImageBuffers(files, Product, `${restaurant.folderKey}/Products`);
 
-        // Delete old images from Cloudinary if new ones are added
+        // Delete old images (automatically handles both Cloudinary and S3)
         if (newImages.length > 0 && existingProduct.images?.length > 0) {
-            const publicIdsToDelete = existingProduct.images.map(img => img.publicId);
-            await deleteCloudinaryImages(publicIdsToDelete);
+            // Use image URLs for better detection, fallback to publicId
+            const itemsToDelete = existingProduct.images.map(img => img.url || img.publicId);
+            await deleteImages(itemsToDelete);
             updateData.images = newImages;
         }
     }
@@ -310,7 +433,9 @@ productCtlr.delete = async ({ params: { productId }, user }) => {
     if (!product) {
         throw { status: 404, message: "Product not found or You are not authorized to delete this Product" };
     }
-    await deleteCloudinaryImages(product.images.map(img => img.publicId));
+    // Use image URLs for better detection, fallback to publicId
+    const itemsToDelete = product.images.map(img => img.url || img.publicId);
+    await deleteImages(itemsToDelete);
     
     return { message: "Product deleted successfully", data: product };
 };
@@ -342,9 +467,9 @@ productCtlr.bulkDelete = async ({ body, user }) => {
         throw { status: 404, message: "No products found or you are not authorized to delete these products" };
     }
     
-    // Collect all image public IDs for deletion
-    const allImagePublicIds = products.flatMap(product => 
-        product.images.map(img => img.publicId)
+    // Collect all image URLs or publicIds for deletion (prefer URLs for better detection)
+    const allImageItems = products.flatMap(product => 
+        product.images.map(img => img.url || img.publicId)
     );
     
     // Delete products from database
@@ -353,9 +478,9 @@ productCtlr.bulkDelete = async ({ body, user }) => {
         restaurantId 
     });
     
-    // Delete images from Cloudinary
-    if (allImagePublicIds.length > 0) {
-        await deleteCloudinaryImages(allImagePublicIds);
+    // Delete images (automatically handles both Cloudinary and S3)
+    if (allImageItems.length > 0) {
+        await deleteImages(allImageItems);
     }
     
     return { 

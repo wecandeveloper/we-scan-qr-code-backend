@@ -205,6 +205,14 @@ const restaurantValidationSchema = {
         errorMessage: "Layout style must be a string",
         },
     },
+
+    subscription: {
+        optional: true,
+        isIn: {
+            options: [['standard', 'premium', 'advanced']],
+            errorMessage: "Subscription must be 'standard', 'premium', or 'advanced'",
+        },
+    },
 };
 
 module.exports = restaurantValidationSchema

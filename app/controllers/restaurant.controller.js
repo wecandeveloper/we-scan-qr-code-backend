@@ -4,13 +4,65 @@ const Restaurant = require('../models/restaurant.model');
 const Category = require('../models/category.model');
 const Product = require('../models/product.model');
 const slugify = require('slugify');
-const { processMultipleImageBuffers, deleteCloudinaryImages, uploadImageBuffer, getBufferHash } = require('../services/cloudinaryService/cloudinary.uploader');
+const { processMultipleImageBuffers, deleteImages, uploadImageBuffer, getBufferHash } = require('../services/unifiedUploader/unified.uploader');
 const User = require('../models/user.model');
 const Table = require('../models/table.model');
 const { generateQRCodeURL } = require('../services/generateQRCode/generateQrCode');
 const { websiteUrl } = require('../apis/api');
 const { sendMailFunc } = require('../services/nodemailerService/nodemailer.service');
 const { restaurantCreatedMailTemplate } = require('../services/nodemailerService/restaurantCreatedMailTemplate');
+const { encryptPaymentKey, decryptPaymentKey, isEncrypted } = require('../utils/paymentEncryption');
+
+/**
+ * Mask payment keys for security (show only last 4 characters)
+ * @param {String} key - The key to mask
+ * @returns {String} - Masked key (e.g., "sk_live_****1234")
+ */
+const maskPaymentKey = (key) => {
+    if (!key || typeof key !== 'string') return null;
+    if (key.length <= 4) return '****';
+    return key.substring(0, key.length - 4) + '****' + key.substring(key.length - 4);
+};
+
+/**
+ * Mask payment settings keys before returning to frontend
+ * @param {Object} restaurant - Restaurant object with paymentSettings
+ * @returns {Object} - Restaurant object with masked keys
+ */
+const maskPaymentSettings = (restaurant) => {
+    if (!restaurant || !restaurant.paymentSettings) return restaurant;
+    
+    const masked = JSON.parse(JSON.stringify(restaurant)); // Deep clone
+    
+    if (masked.paymentSettings.stripe) {
+        if (masked.paymentSettings.stripe.secretKey) {
+            // If encrypted, we can't mask it properly, so show a placeholder
+            masked.paymentSettings.stripe.secretKey = isEncrypted(masked.paymentSettings.stripe.secretKey)
+                ? 'enc:****' // Show that it's encrypted
+                : maskPaymentKey(masked.paymentSettings.stripe.secretKey);
+        }
+        if (masked.paymentSettings.stripe.webhookSecret) {
+            masked.paymentSettings.stripe.webhookSecret = isEncrypted(masked.paymentSettings.stripe.webhookSecret)
+                ? 'enc:****'
+                : maskPaymentKey(masked.paymentSettings.stripe.webhookSecret);
+        }
+    }
+    
+    if (masked.paymentSettings.paymob) {
+        if (masked.paymentSettings.paymob.apiKey) {
+            masked.paymentSettings.paymob.apiKey = isEncrypted(masked.paymentSettings.paymob.apiKey)
+                ? 'enc:****'
+                : maskPaymentKey(masked.paymentSettings.paymob.apiKey);
+        }
+        if (masked.paymentSettings.paymob.hmacSecret) {
+            masked.paymentSettings.paymob.hmacSecret = isEncrypted(masked.paymentSettings.paymob.hmacSecret)
+                ? 'enc:****'
+                : maskPaymentKey(masked.paymentSettings.paymob.hmacSecret);
+        }
+    }
+    
+    return masked;
+};
 
 const generateTablesForRestaurant = async (restaurantId, count) => {
     const tables = [];
@@ -424,12 +476,14 @@ restaurantCtlr.update = async ({ params: { restaurantId }, body, files, user }) 
         // Combine frontend existing images + new images
         const updatedImages = [...existingImagesFromFrontend, ...newImages];
 
-        // Delete removed images from Cloudinary
+        // Delete removed images (automatically handles both Cloudinary and S3)
         const removedImages = existingImagesInDB.filter(
             img => !updatedImages.find(i => i.publicId === img.publicId)
         );
         if (removedImages.length > 0) {
-            await deleteCloudinaryImages(removedImages.map(img => img.publicId));
+            // Use image URLs for better detection, fallback to publicId
+            const itemsToDelete = removedImages.map(img => img.url || img.publicId);
+            await deleteImages(itemsToDelete);
         }
 
         return updatedImages;
@@ -481,7 +535,9 @@ restaurantCtlr.update = async ({ params: { restaurantId }, body, files, user }) 
     // 🖼️ Logo
     if (files.logo && files.logo.length > 0) {
         if (existingRestaurant.theme.logo?.publicId) {
-            await deleteCloudinaryImages([existingRestaurant.theme.logo.publicId]);
+            // Use image URL for better detection, fallback to publicId
+            const itemToDelete = existingRestaurant.theme.logo.url || existingRestaurant.theme.logo.publicId;
+            await deleteImages([itemToDelete]);
         }
         const logoFile = files.logo[0];
         const hash = getBufferHash(logoFile.buffer);
@@ -499,7 +555,9 @@ restaurantCtlr.update = async ({ params: { restaurantId }, body, files, user }) 
     // 🖼️ FavIcon
     if (files.favIcon && files.favIcon.length > 0) {
         if (existingRestaurant.theme.favIcon?.publicId) {
-            await deleteCloudinaryImages([existingRestaurant.theme.favIcon.publicId]);
+            // Use image URL for better detection, fallback to publicId
+            const itemToDelete = existingRestaurant.theme.favIcon.url || existingRestaurant.theme.favIcon.publicId;
+            await deleteImages([itemToDelete]);
         }
         const favIconFile = files.favIcon[0];
         const hash = getBufferHash(favIconFile.buffer);
@@ -527,6 +585,110 @@ restaurantCtlr.update = async ({ params: { restaurantId }, body, files, user }) 
         await updateRestaurantTables(restaurantId, body.tableCount);
     }
 
+    // 💳 Handle payment settings (Advanced subscription only)
+    if (body.paymentSettings && existingRestaurant.subscription === 'advanced') {
+        const paymentSettings = existingRestaurant.paymentSettings || {};
+        const incomingSettings = typeof body.paymentSettings === 'string' 
+            ? JSON.parse(body.paymentSettings) 
+            : body.paymentSettings;
+
+        // Update payment enabled toggle
+        if (incomingSettings.isPaymentEnabled !== undefined) {
+            paymentSettings.isPaymentEnabled = incomingSettings.isPaymentEnabled;
+        }
+
+        // Update selected gateway
+        if (incomingSettings.selectedGateway !== undefined) {
+            paymentSettings.selectedGateway = incomingSettings.selectedGateway;
+        }
+
+        // Update currency
+        if (incomingSettings.currency) {
+            paymentSettings.currency = incomingSettings.currency;
+        }
+
+        // Handle Stripe settings
+        if (incomingSettings.stripe) {
+            paymentSettings.stripe = paymentSettings.stripe || {};
+            
+            // Publishable key (plain text - public)
+            if (incomingSettings.stripe.publishableKey !== undefined) {
+                paymentSettings.stripe.publishableKey = incomingSettings.stripe.publishableKey;
+            }
+
+            // Secret key (encrypt if provided and not already encrypted)
+            if (incomingSettings.stripe.secretKey !== undefined && incomingSettings.stripe.secretKey !== '') {
+                if (isEncrypted(incomingSettings.stripe.secretKey)) {
+                    // Already encrypted, keep as is
+                    paymentSettings.stripe.secretKey = incomingSettings.stripe.secretKey;
+                } else {
+                    // Encrypt before storing
+                    paymentSettings.stripe.secretKey = encryptPaymentKey(incomingSettings.stripe.secretKey);
+                }
+            }
+
+            // Webhook secret (encrypt if provided and not already encrypted)
+            if (incomingSettings.stripe.webhookSecret !== undefined && incomingSettings.stripe.webhookSecret !== '') {
+                if (isEncrypted(incomingSettings.stripe.webhookSecret)) {
+                    paymentSettings.stripe.webhookSecret = incomingSettings.stripe.webhookSecret;
+                } else {
+                    paymentSettings.stripe.webhookSecret = encryptPaymentKey(incomingSettings.stripe.webhookSecret);
+                }
+            }
+
+            // Test mode and active status
+            if (incomingSettings.stripe.isTestMode !== undefined) {
+                paymentSettings.stripe.isTestMode = incomingSettings.stripe.isTestMode;
+            }
+            if (incomingSettings.stripe.isActive !== undefined) {
+                paymentSettings.stripe.isActive = incomingSettings.stripe.isActive;
+            }
+        }
+
+        // Handle Paymob settings
+        if (incomingSettings.paymob) {
+            paymentSettings.paymob = paymentSettings.paymob || {};
+            
+            // API Key (encrypt if provided and not already encrypted)
+            if (incomingSettings.paymob.apiKey !== undefined && incomingSettings.paymob.apiKey !== '') {
+                if (isEncrypted(incomingSettings.paymob.apiKey)) {
+                    paymentSettings.paymob.apiKey = incomingSettings.paymob.apiKey;
+                } else {
+                    paymentSettings.paymob.apiKey = encryptPaymentKey(incomingSettings.paymob.apiKey);
+                }
+            }
+
+            // Integration ID (plain text - not sensitive)
+            if (incomingSettings.paymob.integrationId !== undefined) {
+                paymentSettings.paymob.integrationId = incomingSettings.paymob.integrationId;
+            }
+
+            // Merchant ID (plain text - not sensitive)
+            if (incomingSettings.paymob.merchantId !== undefined) {
+                paymentSettings.paymob.merchantId = incomingSettings.paymob.merchantId;
+            }
+
+            // HMAC Secret (encrypt if provided and not already encrypted)
+            if (incomingSettings.paymob.hmacSecret !== undefined && incomingSettings.paymob.hmacSecret !== '') {
+                if (isEncrypted(incomingSettings.paymob.hmacSecret)) {
+                    paymentSettings.paymob.hmacSecret = incomingSettings.paymob.hmacSecret;
+                } else {
+                    paymentSettings.paymob.hmacSecret = encryptPaymentKey(incomingSettings.paymob.hmacSecret);
+                }
+            }
+
+            // Test mode and active status
+            if (incomingSettings.paymob.isTestMode !== undefined) {
+                paymentSettings.paymob.isTestMode = incomingSettings.paymob.isTestMode;
+            }
+            if (incomingSettings.paymob.isActive !== undefined) {
+                paymentSettings.paymob.isActive = incomingSettings.paymob.isActive;
+            }
+        }
+
+        updateData.paymentSettings = paymentSettings;
+    }
+
     // 🔄 If the name changed, regenerate QR code
     if (body.name && body.name !== existingRestaurant.name) {
         const restaurantUrl = `${websiteUrl}/restaurant/${updateData.slug}`;
@@ -542,7 +704,10 @@ restaurantCtlr.update = async ({ params: { restaurantId }, body, files, user }) 
     const newRestaurant = await Restaurant.findById(updatedRestaurant._id)
         .populate('adminId', 'firstName lastName email');
 
-    return { message: "Restaurant updated successfully", data: newRestaurant };
+    // 🔒 Mask payment keys before returning
+    const maskedRestaurant = maskPaymentSettings(newRestaurant);
+
+    return { message: "Restaurant updated successfully", data: maskedRestaurant };
 };
 
 // Toggle Approve Restaurant
@@ -634,39 +799,39 @@ restaurantCtlr.delete = async ({ params: { restaurantId }, user }) => {
         throw { status: 404, message: "Restaurant not found" };
     }
 
-    // Collect all images to delete from Cloudinary
+    // Collect all images to delete (use URLs for better detection, fallback to publicId)
     const imagesToDelete = [];
     
     // Main restaurant images
     if (deletedRestaurant.images?.length > 0) {
-        imagesToDelete.push(...deletedRestaurant.images.map(img => img.publicId));
+        imagesToDelete.push(...deletedRestaurant.images.map(img => img.url || img.publicId));
     }
     
     // Logo
     if (deletedRestaurant.theme?.logo?.publicId) {
-        imagesToDelete.push(deletedRestaurant.theme.logo.publicId);
+        imagesToDelete.push(deletedRestaurant.theme.logo.url || deletedRestaurant.theme.logo.publicId);
     }
     
     // FavIcon
     if (deletedRestaurant.theme?.favIcon?.publicId) {
-        imagesToDelete.push(deletedRestaurant.theme.favIcon.publicId);
+        imagesToDelete.push(deletedRestaurant.theme.favIcon.url || deletedRestaurant.theme.favIcon.publicId);
     }
     
     // Banner images
     if (deletedRestaurant.theme?.bannerImages?.length > 0) {
-        imagesToDelete.push(...deletedRestaurant.theme.bannerImages.map(img => img.publicId));
+        imagesToDelete.push(...deletedRestaurant.theme.bannerImages.map(img => img.url || img.publicId));
     }
     
     // Offer banner images
     if (deletedRestaurant.theme?.offerBannerImages?.length > 0) {
-        imagesToDelete.push(...deletedRestaurant.theme.offerBannerImages.map(img => img.publicId));
+        imagesToDelete.push(...deletedRestaurant.theme.offerBannerImages.map(img => img.url || img.publicId));
     }
 
     // Delete all categories and their images
     const categories = await Category.find({ restaurantId });
     for (const category of categories) {
         if (category.imagePublicId) {
-            imagesToDelete.push(category.imagePublicId);
+            imagesToDelete.push(category.image || category.imagePublicId);
         }
     }
     await Category.deleteMany({ restaurantId });
@@ -675,7 +840,7 @@ restaurantCtlr.delete = async ({ params: { restaurantId }, user }) => {
     const products = await Product.find({ restaurantId });
     for (const product of products) {
         if (product.images?.length > 0) {
-            imagesToDelete.push(...product.images.map(img => img.publicId));
+            imagesToDelete.push(...product.images.map(img => img.url || img.publicId));
         }
     }
     await Product.deleteMany({ restaurantId });
@@ -688,9 +853,9 @@ restaurantCtlr.delete = async ({ params: { restaurantId }, user }) => {
         restaurantId: null,
     });
     
-    // Delete all collected images from Cloudinary
+    // Delete all collected images (automatically handles both Cloudinary and S3)
     if (imagesToDelete.length > 0) {
-        await deleteCloudinaryImages(imagesToDelete);
+        await deleteImages(imagesToDelete);
     }
 
     return { message: "Restaurant Deleted successfully", data: deletedRestaurant };
@@ -704,8 +869,8 @@ restaurantCtlr.updateSubscription = async ({ body, user }) => {
         throw { status: 400, message: "Restaurant ID and subscription are required" };
     }
 
-    if (!['standard', 'premium'].includes(subscription)) {
-        throw { status: 400, message: "Invalid subscription type. Must be 'standard' or 'premium'" };
+    if (!['standard', 'premium', 'advanced'].includes(subscription)) {
+        throw { status: 400, message: "Invalid subscription type. Must be 'standard', 'premium', or 'advanced'" };
     }
 
     // Check if user is super admin
@@ -729,6 +894,92 @@ restaurantCtlr.updateSubscription = async ({ body, user }) => {
         message: "Restaurant subscription updated successfully", 
         data: updatedRestaurant 
     };
+};
+
+// Test Payment Gateway Connection
+restaurantCtlr.testPaymentConnection = async ({ params: { restaurantId }, body, user }) => {
+    if (!restaurantId || !mongoose.Types.ObjectId.isValid(restaurantId)) {
+        throw { status: 400, message: "Valid Restaurant ID is required" };
+    }
+
+    // Verify user owns this restaurant
+    const userData = await User.findById(user.id);
+    if (String(restaurantId) !== String(userData.restaurantId)) {
+        throw { status: 403, message: "You are not authorized to test this restaurant's payment settings" };
+    }
+
+    const restaurant = await Restaurant.findById(restaurantId);
+    if (!restaurant) {
+        throw { status: 404, message: "Restaurant not found" };
+    }
+
+    if (restaurant.subscription !== 'advanced') {
+        throw { status: 400, message: "Payment gateway is only available for Advanced subscription" };
+    }
+
+    const { gateway } = body;
+    if (!gateway || !['stripe', 'paymob'].includes(gateway)) {
+        throw { status: 400, message: "Valid gateway (stripe or paymob) is required" };
+    }
+
+    const paymentSettings = restaurant.paymentSettings || {};
+    
+    try {
+        if (gateway === 'stripe') {
+            const stripeSettings = paymentSettings.stripe || {};
+            if (!stripeSettings.secretKey) {
+                throw { status: 400, message: "Stripe secret key is not configured" };
+            }
+
+            // Decrypt and test Stripe connection
+            const secretKey = decryptPaymentKey(stripeSettings.secretKey);
+            const stripe = require('stripe')(secretKey);
+            
+            // Test connection by retrieving account info
+            const account = await stripe.accounts.retrieve();
+            
+            return {
+                success: true,
+                message: "Stripe connection successful",
+                data: {
+                    accountId: account.id,
+                    testMode: stripeSettings.isTestMode || false
+                }
+            };
+        } else if (gateway === 'paymob') {
+            const paymobSettings = paymentSettings.paymob || {};
+            if (!paymobSettings.apiKey) {
+                throw { status: 400, message: "Paymob API key is not configured" };
+            }
+
+            // Decrypt and test Paymob connection
+            const apiKey = decryptPaymentKey(paymobSettings.apiKey);
+            const axios = require('axios');
+            
+            // Test connection by making an auth request
+            const authResponse = await axios.post('https://uae.paymob.com/api/auth/tokens', {
+                api_key: apiKey
+            });
+
+            if (authResponse.data && authResponse.data.token) {
+                return {
+                    success: true,
+                    message: "Paymob connection successful",
+                    data: {
+                        testMode: paymobSettings.isTestMode || false
+                    }
+                };
+            } else {
+                throw new Error("Invalid Paymob API key");
+            }
+        }
+    } catch (error) {
+        console.error('Payment gateway test error:', error);
+        throw {
+            status: 400,
+            message: error.response?.data?.message || error.message || "Failed to connect to payment gateway. Please check your credentials."
+        };
+    }
 };
 
 module.exports = restaurantCtlr

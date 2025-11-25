@@ -16,8 +16,8 @@ const {
     getBufferHash,
     uploadImageBuffer,
     findDuplicateImage,
-    deleteCloudinaryImages
-} = require('../services/cloudinaryService/cloudinary.uploader');
+    deleteImages
+} = require('../services/unifiedUploader/unified.uploader');
 // const { otpMailTemplate } = require("../nodemailer_service/templates")
 // const { sendMailFunc } = require("../nodemailer_service/nodemailer_service")
 const userCtlr = {}
@@ -59,7 +59,9 @@ userCtlr.register = async ({ body, file }) => {
             existingRejectedUser.profilePicPublicId &&
             existingRejectedUser.profilePicHash !== imageHash
         ) {
-            await deleteCloudinaryImages(existingRejectedUser.profilePicPublicId);
+            // Use image URL for better detection, fallback to publicId
+            const itemToDelete = existingRejectedUser.profilePic || existingRejectedUser.profilePicPublicId;
+            await deleteImages([itemToDelete]);
         }
 
         const salt = await bcrypt.genSalt();
@@ -179,7 +181,9 @@ userCtlr.updateUser = async ({ body, file }) => {
 
         if (existingUser.profilePicHash !== hash) {
             if (existingUser.profilePicPublicId) {
-                await deleteCloudinaryImages(existingUser.profilePicPublicId);
+                // Use image URL for better detection, fallback to publicId
+                const itemToDelete = existingUser.profilePic || existingUser.profilePicPublicId;
+                await deleteImages([itemToDelete]);
             }
 
             const uploaded = await uploadImageBuffer(file.buffer, User);
@@ -235,36 +239,36 @@ userCtlr.delete = async ({ params: { userId } }) => {
             // Collect all images to delete from Cloudinary
             const imagesToDelete = [];
             
-            // Restaurant images
+            // Restaurant images (use URLs for better detection, fallback to publicId)
             if (restaurant.images?.length > 0) {
-                imagesToDelete.push(...restaurant.images.map(img => img.publicId));
+                imagesToDelete.push(...restaurant.images.map(img => img.url || img.publicId));
             }
             
             // Logo
             if (restaurant.theme?.logo?.publicId) {
-                imagesToDelete.push(restaurant.theme.logo.publicId);
+                imagesToDelete.push(restaurant.theme.logo.url || restaurant.theme.logo.publicId);
             }
             
             // FavIcon
             if (restaurant.theme?.favIcon?.publicId) {
-                imagesToDelete.push(restaurant.theme.favIcon.publicId);
+                imagesToDelete.push(restaurant.theme.favIcon.url || restaurant.theme.favIcon.publicId);
             }
             
             // Banner images
             if (restaurant.theme?.bannerImages?.length > 0) {
-                imagesToDelete.push(...restaurant.theme.bannerImages.map(img => img.publicId));
+                imagesToDelete.push(...restaurant.theme.bannerImages.map(img => img.url || img.publicId));
             }
             
             // Offer banner images
             if (restaurant.theme?.offerBannerImages?.length > 0) {
-                imagesToDelete.push(...restaurant.theme.offerBannerImages.map(img => img.publicId));
+                imagesToDelete.push(...restaurant.theme.offerBannerImages.map(img => img.url || img.publicId));
             }
 
             // Delete all categories and their images
             const categories = await Category.find({ restaurantId: user.restaurantId });
             for (const category of categories) {
                 if (category.imagePublicId) {
-                    imagesToDelete.push(category.imagePublicId);
+                    imagesToDelete.push(category.image || category.imagePublicId);
                 }
             }
             await Category.deleteMany({ restaurantId: user.restaurantId });
@@ -273,7 +277,7 @@ userCtlr.delete = async ({ params: { userId } }) => {
             const products = await Product.find({ restaurantId: user.restaurantId });
             for (const product of products) {
                 if (product.images?.length > 0) {
-                    imagesToDelete.push(...product.images.map(img => img.publicId));
+                    imagesToDelete.push(...product.images.map(img => img.url || img.publicId));
                 }
             }
             await Product.deleteMany({ restaurantId: user.restaurantId });
@@ -281,16 +285,18 @@ userCtlr.delete = async ({ params: { userId } }) => {
             // Delete restaurant
             await Restaurant.findByIdAndDelete(user.restaurantId);
 
-            // Delete all collected images from Cloudinary
+            // Delete all collected images (automatically handles both Cloudinary and S3)
             if (imagesToDelete.length > 0) {
-                await deleteCloudinaryImages(imagesToDelete);
+                await deleteImages(imagesToDelete);
             }
         }
     }
 
     // Delete user profile image
     if (user.profilePicPublicId) {
-        await deleteCloudinaryImages(user.profilePicPublicId);
+        // Use image URL for better detection, fallback to publicId
+        const itemToDelete = user.profilePic || user.profilePicPublicId;
+        await deleteImages([itemToDelete]);
     }
 
     // Finally delete the user

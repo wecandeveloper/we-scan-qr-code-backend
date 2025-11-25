@@ -8,6 +8,8 @@ const counterSchema = new mongoose.Schema({
         unique: true
     },
     seq: { type: Number, default: 0 }
+}, { 
+    collection: 'orderCounters' // Use different collection to avoid conflict with mongoose-sequence's 'counters' collection
 });
 
 module.exports = mongoose.model("Counter", counterSchema);

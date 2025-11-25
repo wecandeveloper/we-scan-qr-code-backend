@@ -1,6 +1,6 @@
 const Category = require("../models/category.model");
 const mongoose = require("mongoose");
-const { getBufferHash, findDuplicateImage, uploadImageBuffer, deleteCloudinaryImages } = require("../services/cloudinaryService/cloudinary.uploader");
+const { getBufferHash, findDuplicateImage, uploadImageBuffer, deleteImages } = require("../services/unifiedUploader/unified.uploader");
 const User = require("../models/user.model");
 const Restaurant = require("../models/restaurant.model");
 
@@ -169,10 +169,15 @@ categoryCtlr.update = async ({ params: { categoryId }, user, body, file }) => {
         // Upload only if image is different
         if (existingCategory.imageHash !== hash) {
             if (existingCategory.imagePublicId) {
-                await deleteCloudinaryImages(existingCategory.imagePublicId);
+                // Unified service automatically detects if it's Cloudinary or S3
+                // Pass image URL if available for better detection, otherwise use publicId
+                const itemToDelete = existingCategory.image || existingCategory.imagePublicId;
+                await deleteImages(itemToDelete);
             }
 
-            const uploaded = await uploadImageBuffer(file.buffer, Category);
+            // Get restaurant for folder structure (consistent with create)
+            const restaurant = await Restaurant.findById(existingCategory.restaurantId);
+            const uploaded = await uploadImageBuffer(file.buffer, Category, `${restaurant.folderKey}/Categories`);
             updateData.image = uploaded.secure_url;
             updateData.imagePublicId = uploaded.public_id;
             updateData.imageHash = hash;
@@ -199,7 +204,10 @@ categoryCtlr.delete = async ({ params: { categoryId }, user }) => {
         throw { status: 404, message: "Category not found or You are not authorized to delete this Product" };
     }
     if (category.imagePublicId) {
-        await deleteCloudinaryImages(category.imagePublicId);
+        // Unified service automatically detects if it's Cloudinary or S3
+        // Pass image URL if available for better detection, otherwise use publicId
+        const itemToDelete = category.image || category.imagePublicId;
+        await deleteImages(itemToDelete);
     }
     return { message: "Category deleted successfully", data: category };
 };
@@ -231,10 +239,10 @@ categoryCtlr.bulkDelete = async ({ body, user }) => {
         throw { status: 404, message: "No categories found or you are not authorized to delete these categories" };
     }
     
-    // Collect all image public IDs for deletion
-    const allImagePublicIds = categories
+    // Collect all image URLs or publicIds for deletion (prefer URLs for better detection)
+    const allImageItems = categories
         .filter(category => category.imagePublicId)
-        .map(category => category.imagePublicId);
+        .map(category => category.image || category.imagePublicId);
     
     // Delete categories from database
     const deletedCategories = await Category.deleteMany({ 
@@ -242,9 +250,9 @@ categoryCtlr.bulkDelete = async ({ body, user }) => {
         restaurantId 
     });
     
-    // Delete images from Cloudinary
-    if (allImagePublicIds.length > 0) {
-        await deleteCloudinaryImages(allImagePublicIds);
+    // Delete images (automatically handles both Cloudinary and S3)
+    if (allImageItems.length > 0) {
+        await deleteImages(allImageItems);
     }
     
     return { 

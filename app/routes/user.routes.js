@@ -9,7 +9,7 @@ const userCtlr = require('../controllers/user.controller');
 const { authenticateUser, authorizeUser } = require('../middlewares/auth');
 const setupRoutes = require('./route.util'); // Import the utility
 const { checkSchema } = require('express-validator');
-const upload = require('../services/cloudinaryService/cloudinary.multer');
+const upload = require('../services/unifiedUploader/unified.multer');
 // Define your routes in an array
 const routes = [
     {

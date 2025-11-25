@@ -55,6 +55,59 @@ const productSchema = new Schema({
     isFeatured: { 
         type: Boolean, 
         default: false 
+    },
+    // Size variants (e.g., Small, Medium, Large for juice; Half, Full for chicken)
+    sizes: [
+        {
+            name: {
+                type: String,
+                required: true
+            },
+            price: {
+                type: Number,
+                required: true
+            },
+            isDefault: {
+                type: Boolean,
+                default: false
+            },
+            isAvailable: {
+                type: Boolean,
+                default: true
+            },
+            translations: {
+                type: Map,
+                of: String, // Just the name translation
+                default: new Map()
+            }
+        }
+    ],
+    // Product-specific addOns (e.g., Spicy, Dynamites for French Fries)
+    addOns: [
+        {
+            name: {
+                type: String,
+                required: true
+            },
+            price: {
+                type: Number,
+                default: 0 // Can be free
+            },
+            isAvailable: {
+                type: Boolean,
+                default: true
+            },
+            translations: {
+                type: Map,
+                of: String, // Just the name translation
+                default: new Map()
+            }
+        }
+    ],
+    // Allow common addOns to be applied to this product
+    allowCommonAddOns: {
+        type: Boolean,
+        default: true
     }
 }, { timestamps: true });
 

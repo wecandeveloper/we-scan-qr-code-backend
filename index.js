@@ -29,6 +29,10 @@ socketService.initSocket(io);
 
 configureDB()
 app.use(cors());
+
+// Stripe webhooks require raw body for signature verification
+app.use('/api/payment/stripe/webhook', express.raw({ type: 'application/json' }));
+// All other routes use JSON
 app.use(express.json());
 
 app.use('/api', router)

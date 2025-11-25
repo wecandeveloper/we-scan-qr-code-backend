@@ -56,7 +56,7 @@ const restaurantSchema = new Schema({
     // Subscription and Language Management
     subscription: {
         type: String,
-        enum: ['standard', 'premium'],
+        enum: ['standard', 'premium', 'advanced'],
         default: 'standard'
     },
     languages: {
@@ -147,6 +147,75 @@ const restaurantSchema = new Schema({
         timezone: {
             type: String,
             default: "Asia/Dubai" // UAE timezone
+        }
+    },
+    // Payment Settings (Advanced subscription only)
+    paymentSettings: {
+        isPaymentEnabled: {
+            type: Boolean,
+            default: false
+        },
+        selectedGateway: {
+            type: String,
+            enum: ['stripe', 'paymob', null],
+            default: null
+        },
+        stripe: {
+            publishableKey: {
+                type: String,
+                default: null
+            },
+            secretKey: {
+                type: String,
+                default: null // Will be encrypted
+            },
+            webhookSecret: {
+                type: String,
+                default: null // Will be encrypted
+            },
+            isActive: {
+                type: Boolean,
+                default: false
+            },
+            isTestMode: {
+                type: Boolean,
+                default: true
+            }
+        },
+        paymob: {
+            apiKey: {
+                type: String,
+                default: null // Will be encrypted
+            },
+            integrationId: {
+                type: String,
+                default: null
+            },
+            merchantId: {
+                type: String,
+                default: null
+            },
+            hmacSecret: {
+                type: String,
+                default: null // Will be encrypted
+            },
+            isActive: {
+                type: Boolean,
+                default: false
+            },
+            isTestMode: {
+                type: Boolean,
+                default: true
+            }
+        },
+        currency: {
+            type: String,
+            default: 'AED',
+            enum: ['AED', 'USD', 'EUR']
+        },
+        lastValidated: {
+            type: Date,
+            default: null
         }
     }
 }, { timestamps: true });

@@ -6,6 +6,9 @@ const productRouter = require('./product.routes')
 const orderRouter = require('./order.routes')
 const couponRouter = require('./coupon.routes')
 const tableRouter = require('./table.routes')
+const commonAddOnRouter = require('./commonAddOn.routes')
+const stripePaymentRouter = require('./payment.stripe.routes')
+const paymobPaymentRouter = require('./payment.paymob.routes')
 const router = Router();
 
 router.use('/user', userRouter)
@@ -15,5 +18,8 @@ router.use('/product', productRouter)
 router.use('/order', orderRouter)
 router.use('/coupon', couponRouter)
 router.use('/table', tableRouter)
+router.use('/commonAddOn', commonAddOnRouter)
+router.use('/payment/stripe', stripePaymentRouter)
+router.use('/payment/paymob', paymobPaymentRouter)
 
 module.exports = router;
