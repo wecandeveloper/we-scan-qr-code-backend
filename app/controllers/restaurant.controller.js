@@ -333,6 +333,7 @@ restaurantCtlr.myRestaurant = async ({ user }) => {
 
 // Get One Restaurant by ID
 restaurantCtlr.show = async ({ params: { restaurantSlug } }) => {
+    console.log(restaurantSlug, "restaurantSlug in show");
     // if (!restaurantId || !mongoose.Types.ObjectId.isValid(restaurantId)) {
     //     throw { status: 400, message: "Valid Restaurant ID is required" };
     // }
@@ -340,6 +341,7 @@ restaurantCtlr.show = async ({ params: { restaurantSlug } }) => {
         throw { status: 400, message: "Valid Restaurant Slug is required" };
     }
     const restaurant = await Restaurant.findOne({ slug: restaurantSlug }).select({isApproved: 0, isBlocked: 0, adminId: 0})
+    console.log(restaurant, "restaurant in show");
     if (!restaurant) {
         throw { status: 404, message: "Restaurant not found" };
     }
