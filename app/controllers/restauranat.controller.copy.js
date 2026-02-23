@@ -1,7 +1,7 @@
 const { default: mongoose } = require('mongoose');
 const Restaurant = require('../models/restaurant.model');
 const slugify = require('slugify');
-const { processMultipleImageBuffers, deleteCloudinaryImages, uploadImageBuffer } = require('../services/cloudinaryService/cloudinary.uploader');
+const { processMultipleImageBuffers, deleteImages, uploadImageBuffer } = require('../services/unifiedUploader/unified.uploader');
 const User = require('../models/user.model');
 const Table = require('../models/table.model');
 const { generateQRCodeURL } = require('../services/generateQRCode/generateQrCode');
@@ -234,7 +234,7 @@ restaurantCtlr.update = async ({ params: { restaurantId }, body, files, user }) 
     if (files && files.length > 0) {
         // Optional: Delete previous images before upload (uncomment if you want to replace)
         const oldPublicIds = existingRestaurant.images.map(img => img.publicId);
-        await deleteCloudinaryImages(oldPublicIds);
+        await deleteImages(oldPublicIds);
 
         newImages = await processMultipleImageBuffers(files, Restaurant);
     }
@@ -339,7 +339,7 @@ restaurantCtlr.delete = async ({ params: { restaurantId }, user }) => {
         restaurantId: null,
     });
 
-    await deleteCloudinaryImages(deletedRestaurant.images.map(img => img.publicId));
+    await deleteImages(deletedRestaurant.images.map(img => img.publicId));
 
     return { message: "Restaurant Deleted successfully", data: deletedRestaurant };
 };

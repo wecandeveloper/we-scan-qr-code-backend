@@ -131,7 +131,7 @@ const otpMailTemplate = (otp) => `
     <div class="email-wrapper">
         <!-- Header -->
         <div class="email-header">
-            <img src="https://res.cloudinary.com/dblnpclgb/image/upload/v1756978484/we-scan-logo_mzgyfg.png" alt="WeScan Logo" />
+            <img src="https://dineos-bucket.s3.me-central-1.amazonaws.com/We-QrCode/wecan-scan-logo.png" alt="WeScan Logo" />
         </div>
 
         <!-- Body -->

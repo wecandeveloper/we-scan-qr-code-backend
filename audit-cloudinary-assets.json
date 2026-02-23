@@ -1,0 +1,16 @@
+{
+  "summary": {
+    "totalEntries": 0,
+    "byCollection": {
+      "User": 0,
+      "Restaurant": 0,
+      "Product": 0,
+      "Category": 0
+    },
+    "generatedAt": "2026-02-23T09:42:51.873Z"
+  },
+  "User": [],
+  "Restaurant": [],
+  "Product": [],
+  "Category": []
+}

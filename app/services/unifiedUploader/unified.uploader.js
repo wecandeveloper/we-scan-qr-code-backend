@@ -1,16 +1,10 @@
 /**
  * Unified Uploader Service
- * 
- * This service provides a unified interface for both Cloudinary and AWS S3.
- * It automatically detects which provider to use based on URLs and routes operations accordingly.
- * 
- * Migration Strategy:
- * - New uploads go to AWS S3
- * - Old Cloudinary URLs are still supported for deletion/operations
- * - Use this service instead of direct Cloudinary/S3 calls for seamless migration
+ *
+ * Uses AWS S3 for all uploads and deletes.
+ * Cloudinary URLs are skipped on delete (migration complete; remaining refs are 404).
  */
 
-const cloudinaryService = require('../cloudinaryService/cloudinary.uploader');
 const awsService = require('../awsService/aws.uploader');
 
 /**
@@ -58,52 +52,39 @@ const processMultipleImageBuffers = async (files, Model = null, customFolder = n
 
 /**
  * Unified delete images
- * Automatically detects provider from URL/key and routes to appropriate service
+ * Routes S3 URLs/keys to AWS; skips Cloudinary URLs (no-op, migration complete)
  */
 const deleteImages = async (publicIdsOrUrls = []) => {
     const items = Array.isArray(publicIdsOrUrls) ? publicIdsOrUrls : [publicIdsOrUrls];
-    
-    const cloudinaryItems = [];
     const s3Items = [];
 
     for (const item of items) {
         if (!item) continue;
 
-        // Check if it's a URL
         const provider = detectProvider(item);
-        
+
         if (provider === 'cloudinary') {
-            cloudinaryItems.push(item);
-        } else if (provider === 's3') {
-            s3Items.push(item);
-        } else {
-            // If it's not a URL, it might be a publicId/key
-            // Heuristic: S3 keys often have file extensions (.jpg, .png) and UUIDs
-            // Cloudinary publicIds typically don't have extensions and are shorter
-            // For safety with old data, default to Cloudinary if uncertain
-            const hasFileExtension = /\.(jpg|jpeg|png|gif|webp|avif)$/i.test(item);
-            const hasUuidPattern = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(item);
-            
-            if (hasFileExtension || hasUuidPattern || item.length > 60) {
-                // Likely S3 key (has extension or UUID pattern or very long)
-                s3Items.push(item);
-            } else {
-                // Likely Cloudinary publicId (no extension, shorter, older format)
-                cloudinaryItems.push(item);
-            }
+            // No-op: migration complete; remaining Cloudinary refs are 404
+            continue;
         }
+        if (provider === 's3') {
+            s3Items.push(item);
+            continue;
+        }
+
+        // Not a URL - treat as publicId/key
+        const hasFileExtension = /\.(jpg|jpeg|png|gif|webp|avif)$/i.test(item);
+        const hasUuidPattern = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(item);
+
+        if (hasFileExtension || hasUuidPattern || item.length > 60) {
+            s3Items.push(item);
+        }
+        // Else: likely old Cloudinary publicId - skip (no-op)
     }
 
-    // Delete from both providers if needed
-    const promises = [];
-    if (cloudinaryItems.length > 0) {
-        promises.push(cloudinaryService.deleteCloudinaryImages(cloudinaryItems));
-    }
     if (s3Items.length > 0) {
-        promises.push(awsService.deleteS3Images(s3Items));
+        await awsService.deleteS3Images(s3Items);
     }
-
-    await Promise.all(promises);
 };
 
 /**
@@ -115,32 +96,17 @@ const deleteImagesFromUrls = async (urls = []) => {
     await deleteImages(urlArray);
 };
 
-/**
- * Get buffer hash (same for both providers)
- */
-const getBufferHash = cloudinaryService.getBufferHash;
-
-/**
- * Find duplicate image (same for both providers - checks database)
- */
-const findDuplicateImage = cloudinaryService.findDuplicateImage;
+const getBufferHash = awsService.getBufferHash;
+const findDuplicateImage = awsService.findDuplicateImage;
 
 module.exports = {
-    // Upload functions (always use S3)
     uploadImageBuffer,
     processMultipleImageBuffers,
-    
-    // Delete functions (auto-detect provider)
     deleteImages,
     deleteImagesFromUrls,
-    
-    // Utility functions
     getBufferHash,
     findDuplicateImage,
     detectProvider,
-    
-    // Direct access to providers (for edge cases)
-    cloudinary: cloudinaryService,
     aws: awsService
 };
 

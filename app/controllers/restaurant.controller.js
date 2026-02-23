@@ -1,5 +1,4 @@
 const { default: mongoose } = require('mongoose');
-const cloudinary = require('../config/cloudinary');
 const Restaurant = require('../models/restaurant.model');
 const Category = require('../models/category.model');
 const Product = require('../models/product.model');

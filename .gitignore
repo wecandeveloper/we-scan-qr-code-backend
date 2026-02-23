@@ -3,6 +3,7 @@ node_modules/
 
 # Environment variables
 .env
+.env.local
 
 # Logs
 logs/
@@ -19,3 +20,7 @@ Thumbs.db
 dist/
 build/
 coverage/
+
+# Migration scripts output
+migration-mapping.json
+migration-failures.json
