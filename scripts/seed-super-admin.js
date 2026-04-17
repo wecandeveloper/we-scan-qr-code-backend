@@ -46,10 +46,9 @@ async function seedSuperAdmin() {
     await mongoose.connect(mongoUri);
     console.log("Connected to MongoDB");
 
-    const existingSuperAdmin = await User.findOne({ role: "superAdmin" }).select("_id");
-    if (existingSuperAdmin) {
-        console.log("Super admin already exists. Skipping seed.");
-        return;
+    const deleteResult = await User.deleteMany({ role: "superAdmin" });
+    if (deleteResult.deletedCount > 0) {
+        console.log(`Removed ${deleteResult.deletedCount} existing super admin user(s).`);
     }
 
     const passwordHash = await bcrypt.hash(process.env.SUPER_ADMIN_PASSWORD, 10);
@@ -71,7 +70,7 @@ async function seedSuperAdmin() {
         isBlocked: false,
     });
 
-    console.log("Super admin created successfully.");
+    console.log("Super admin replaced successfully.");
 }
 
 async function main() {
