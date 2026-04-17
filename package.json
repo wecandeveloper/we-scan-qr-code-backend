@@ -7,7 +7,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "deploy": "webpack --mode production"
+    "deploy": "webpack --mode production",
+    "seed:super-admin": "node scripts/seed-super-admin.js"
   },
   "keywords": [],
   "author": "",

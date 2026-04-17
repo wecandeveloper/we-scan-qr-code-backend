@@ -1,0 +1,42 @@
+{
+  "phase": "Phase 2",
+  "failures": [
+    {
+      "objectId": "68de7fe3c4bfc9b3bb691f23",
+      "field": "images[0]",
+      "url": "https://res.cloudinary.com/dblnpclgb/image/upload/v1759412195/We-QrCode/chapati-",
+      "reason": "URL not in mapping"
+    },
+    {
+      "objectId": "68ee47913ef106bd50bba968",
+      "field": "images[0]",
+      "url": "https://res.cloudinary.com/dblnpclgb/image/upload/v1759412638/We-QrCode/chapati-",
+      "reason": "URL not in mapping"
+    },
+    {
+      "objectId": "68ee4af73ef106bd50bba9f7",
+      "field": "images[0]",
+      "url": "https://res.cloudinary.com/dblnpclgb/image/upload/v1759412252/We-QrCode/chapati-",
+      "reason": "URL not in mapping"
+    },
+    {
+      "objectId": "68ee4b4b3ef106bd50bbaa11",
+      "field": "images[0]",
+      "url": "https://res.cloudinary.com/dblnpclgb/image/upload/v1759412352/We-QrCode/chapati-",
+      "reason": "URL not in mapping"
+    },
+    {
+      "objectId": "694e36aa4fc5c99d0eab4da8",
+      "field": "images[0]",
+      "url": "https://res.cloudinary.com/dblnpclgb/image/upload/v1766733481/We-QrCode/reset-lo",
+      "reason": "URL not in mapping"
+    },
+    {
+      "objectId": "694ecd0e4fc5c99d0eab5be5",
+      "field": "images[0]",
+      "url": "https://res.cloudinary.com/dblnpclgb/image/upload/v1769692965/We-QrCode/reset-lo",
+      "reason": "URL not in mapping"
+    }
+  ],
+  "updatedAt": "2026-02-23T09:35:52.565Z"
+}
