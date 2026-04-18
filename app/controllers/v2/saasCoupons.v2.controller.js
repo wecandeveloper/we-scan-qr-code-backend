@@ -200,4 +200,66 @@ ctl.applyPromotionCode = async ({ user, body }) => {
     return { message: 'Promotion applied to subscription', data: { subscriptionId: updated.id } };
 };
 
+ctl.setPaused = async ({ user, body }) => {
+    if (user.role !== 'superAdmin') {
+        throw { status: 403, message: 'Forbidden' };
+    }
+    const { couponId, paused } = body;
+    if (!mongoose.Types.ObjectId.isValid(couponId)) {
+        throw { status: 400, message: 'Invalid couponId' };
+    }
+    const pausedBool = Boolean(paused);
+    const doc = await SaasCoupon.findById(couponId);
+    if (!doc) {
+        throw { status: 404, message: 'Coupon not found' };
+    }
+    if (!doc.isActive) {
+        throw { status: 400, message: 'Cannot change pause state on a deactivated coupon' };
+    }
+
+    if (doc.stripePromotionCodeId) {
+        try {
+            const stripe = requireSaasStripe();
+            await stripe.promotionCodes.update(doc.stripePromotionCodeId, { active: !pausedBool });
+        } catch (e) {
+            throw { status: 502, message: e.message || 'Could not update promotion in Stripe' };
+        }
+    }
+
+    doc.isPaused = pausedBool;
+    await doc.save();
+    return { message: pausedBool ? 'Coupon paused' : 'Coupon resumed', data: doc };
+};
+
+ctl.deactivate = async ({ user, body }) => {
+    if (user.role !== 'superAdmin') {
+        throw { status: 403, message: 'Forbidden' };
+    }
+    const { couponId } = body;
+    if (!mongoose.Types.ObjectId.isValid(couponId)) {
+        throw { status: 400, message: 'Invalid couponId' };
+    }
+    const doc = await SaasCoupon.findById(couponId);
+    if (!doc) {
+        throw { status: 404, message: 'Coupon not found' };
+    }
+    if (!doc.isActive) {
+        return { message: 'Already deactivated', data: doc };
+    }
+
+    if (doc.stripePromotionCodeId) {
+        try {
+            const stripe = requireSaasStripe();
+            await stripe.promotionCodes.update(doc.stripePromotionCodeId, { active: false });
+        } catch (e) {
+            throw { status: 502, message: e.message || 'Could not deactivate promotion in Stripe' };
+        }
+    }
+
+    doc.isActive = false;
+    doc.isPaused = false;
+    await doc.save();
+    return { message: 'Coupon deactivated', data: doc };
+};
+
 module.exports = ctl;

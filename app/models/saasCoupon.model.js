@@ -19,6 +19,8 @@ const saasCouponSchema = new Schema(
         trialPeriodDays: { type: Number, default: null },
         maxRedemptions: { type: Number, default: null },
         expiresAt: { type: Date, default: null },
+        /** Temporarily blocks checkout; Stripe promotion set inactive when applicable */
+        isPaused: { type: Boolean, default: false },
         isActive: { type: Boolean, default: true },
         createdBy: { type: Schema.Types.ObjectId, ref: 'User', default: null },
         metadata: { type: Schema.Types.Mixed, default: {} }

@@ -12,7 +12,11 @@ async function resolvePromotionForCheckout(promotionCodeRaw) {
     if (!code) {
         return { discounts: undefined, subscriptionData: {} };
     }
-    const doc = await SaasCoupon.findOne({ promotionCode: code, isActive: true }).lean();
+    const doc = await SaasCoupon.findOne({
+        promotionCode: code,
+        isActive: true,
+        $nor: [{ isPaused: true }]
+    }).lean();
     if (!doc) {
         const err = new Error('Invalid or inactive promotion code');
         err.status = 400;

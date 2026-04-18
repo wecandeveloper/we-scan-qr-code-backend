@@ -107,6 +107,18 @@ const couponRoutes = [
         path: '/apply',
         middlewares: [authenticateUser, authorizeUser(['superAdmin'])],
         handler: saasCouponsCtlr.applyPromotionCode
+    },
+    {
+        method: 'post',
+        path: '/pause',
+        middlewares: [authenticateUser, authorizeUser(['superAdmin'])],
+        handler: saasCouponsCtlr.setPaused
+    },
+    {
+        method: 'post',
+        path: '/deactivate',
+        middlewares: [authenticateUser, authorizeUser(['superAdmin'])],
+        handler: saasCouponsCtlr.deactivate
     }
 ];
 
