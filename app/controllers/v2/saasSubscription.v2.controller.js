@@ -197,7 +197,7 @@ ctl.completeGuestSignup = async ({ body }) => {
     }
 
     const tokenData = {
-        id: user._id,
+        id: String(user._id),
         role: user.role,
         userId: user.userId,
         email: user.email.address,
@@ -313,13 +313,35 @@ ctl.me = async ({ user }) => {
         };
     }
 
-    const [restaurant, saas] = await Promise.all([
+    let [restaurant, saas] = await Promise.all([
         Restaurant.findById(restaurantId).select('subscription billingOverride name').lean(),
         SaasSubscription.findOne({ restaurantId }).lean()
     ]);
 
     const override = restaurant?.billingOverride;
+
+    // After Checkout, webhooks can lag; refresh from Stripe once when we have a sub id but not active yet.
+    if (
+        saas?.stripeSubscriptionId &&
+        saas.status === 'pending' &&
+        !override?.enabled
+    ) {
+        try {
+            const stripe = requireSaasStripe();
+            const sub = await stripe.subscriptions.retrieve(saas.stripeSubscriptionId, {
+                expand: ['items.data.price']
+            });
+            await upsertSaasSubscriptionFromStripe(sub, restaurantId, saas.adminUserId || null);
+            saas = await SaasSubscription.findOne({ restaurantId }).lean();
+        } catch (e) {
+            console.warn('[subscriptions/me] Stripe refresh failed', e.message);
+        }
+    }
+
     const effectiveTier = override?.enabled ? override.tier : restaurant?.subscription;
+
+    const stripeSaysPaid =
+        saas && ['active', 'trialing'].includes(String(saas.stripeStatus || '').toLowerCase());
 
     return {
         message: 'Billing status',
@@ -342,7 +364,8 @@ ctl.me = async ({ user }) => {
             dashboardAllowed:
                 user.role === 'superAdmin' ||
                 Boolean(override?.enabled) ||
-                (saas && saas.status === 'active')
+                (saas && saas.status === 'active') ||
+                Boolean(stripeSaysPaid)
         }
     };
 };
