@@ -40,6 +40,18 @@ async function start() {
         '/api/subscriptions/complete-guest',
         commonController(saasSubscriptionV2.completeGuestSignup)
     );
+    app.post(
+        '/api/subscriptions/check-signup-email',
+        commonController(saasSubscriptionV2.checkSignupEmail)
+    );
+    app.post(
+        '/api/subscriptions/guest-send-email-otp',
+        commonController(saasSubscriptionV2.sendGuestSignupEmailOtp)
+    );
+    app.post(
+        '/api/subscriptions/guest-verify-email-otp',
+        commonController(saasSubscriptionV2.verifyGuestSignupEmailOtp)
+    );
     app.use('/api/v2', v2Router);
 
     app.get('/', (req, res) => {

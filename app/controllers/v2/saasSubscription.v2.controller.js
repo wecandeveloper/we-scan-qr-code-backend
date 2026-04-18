@@ -17,8 +17,27 @@ const {
     upsertSaasSubscriptionFromStripe
 } = require('../../services/saasStripe/subscriptionSync.service');
 const { provisionGuestSignupFromStripeSession } = require('../../services/saasStripe/guestSaasSignup.service');
+const redisClient = require('../../config/redis');
+const { sendMailFunc } = require('../../services/nodemailerService/nodemailer.service');
+const { otpMailTemplate } = require('../../services/nodemailerService/templates');
 
 const ctl = {};
+
+function guestSaasOtpRedisKey(emailNorm) {
+    return `guest_saas_otp:${emailNorm}`;
+}
+
+function guestSaasEmailOkRedisKey(emailNorm) {
+    return `guest_saas_email_ok:${emailNorm}`;
+}
+
+async function redisGetSafe(key) {
+    try {
+        return await redisClient.get(key);
+    } catch (e) {
+        return null;
+    }
+}
 
 function maskId(id) {
     if (!id || id.length < 10) return null;
@@ -81,6 +100,98 @@ function normalizeGuestEmail(email) {
         .toLowerCase();
 }
 
+const GUEST_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+ctl.checkSignupEmail = async ({ body }) => {
+    const emailNorm = normalizeGuestEmail(body?.email);
+    if (!emailNorm) {
+        return { message: 'OK', data: { available: true, empty: true } };
+    }
+    if (!GUEST_EMAIL_RE.test(emailNorm)) {
+        return { message: 'OK', data: { available: true, invalidFormat: true } };
+    }
+    const existing = await User.findOne({ 'email.address': emailNorm }).select('_id').lean();
+    return { message: 'OK', data: { available: !existing } };
+};
+
+ctl.sendGuestSignupEmailOtp = async ({ body }) => {
+    const emailNorm = normalizeGuestEmail(body?.email);
+    if (!emailNorm || !GUEST_EMAIL_RE.test(emailNorm)) {
+        throw { status: 400, message: 'Valid email is required' };
+    }
+    const existing = await User.findOne({ 'email.address': emailNorm }).select('_id').lean();
+    if (existing) {
+        throw { status: 400, message: 'This email is already registered.' };
+    }
+
+    const otpKey = guestSaasOtpRedisKey(emailNorm);
+    const okKey = guestSaasEmailOkRedisKey(emailNorm);
+    const redisMailData = await redisGetSafe(otpKey);
+    if (redisMailData && redisMailData.count > 5) {
+        throw { status: 400, message: 'Too many requests. Try again later.' };
+    }
+
+    const otp = Math.floor(Math.random() * 900000) + 100000;
+    await redisClient.set(
+        otpKey,
+        {
+            otp,
+            count: (redisMailData?.count ?? 0) + 1,
+            createdAt: redisMailData?.createdAt ?? new Date(),
+            lastSentAt: new Date()
+        },
+        60 * 10
+    );
+    await redisClient.del(okKey);
+
+    try {
+        const mailData = await sendMailFunc({
+            to: emailNorm,
+            subject: 'DineOS — verify your email',
+            html: otpMailTemplate(otp)
+        });
+        if (!mailData.isSend) {
+            await redisClient.del(otpKey);
+            throw { status: 400, message: 'Could not send email. Try again later.' };
+        }
+    } catch (err) {
+        if (err.status) throw err;
+        await redisClient.del(otpKey);
+        throw { status: 400, message: 'Could not send email. Try again later.' };
+    }
+
+    return { message: 'Verification code sent', data: { sent: true } };
+};
+
+ctl.verifyGuestSignupEmailOtp = async ({ body }) => {
+    const emailNorm = normalizeGuestEmail(body?.email);
+    if (!emailNorm || !GUEST_EMAIL_RE.test(emailNorm)) {
+        throw { status: 400, message: 'Valid email is required' };
+    }
+    const existing = await User.findOne({ 'email.address': emailNorm }).select('_id').lean();
+    if (existing) {
+        throw { status: 400, message: 'This email is already registered.' };
+    }
+
+    const otpKey = guestSaasOtpRedisKey(emailNorm);
+    const stored = await redisGetSafe(otpKey);
+    if (!stored) {
+        throw { status: 400, message: 'Code expired or not sent. Request a new code.' };
+    }
+    const given = Number(body?.otp);
+    if (!Number.isFinite(given) || given < 100000 || given > 999999) {
+        throw { status: 400, message: 'Enter the 6-digit code from your email.' };
+    }
+    if (Number(stored.otp) !== given) {
+        throw { status: 400, message: 'Incorrect code. Try again.' };
+    }
+
+    await redisClient.del(otpKey);
+    await redisClient.set(guestSaasEmailOkRedisKey(emailNorm), { verifiedAt: Date.now() }, 60 * 30);
+
+    return { message: 'Email verified', data: { verified: true } };
+};
+
 ctl.createGuestCheckout = async ({ body }) => {
     const {
         firstName,
@@ -95,7 +206,7 @@ ctl.createGuestCheckout = async ({ body }) => {
     } = body;
 
     const emailNorm = normalizeGuestEmail(email);
-    if (!emailNorm || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailNorm)) {
+    if (!emailNorm || !GUEST_EMAIL_RE.test(emailNorm)) {
         throw { status: 400, message: 'Valid email is required' };
     }
     if (!password || String(password).length < 8) {
@@ -117,6 +228,16 @@ ctl.createGuestCheckout = async ({ body }) => {
             message: 'An account with this email already exists. Sign in to manage your subscription.'
         };
     }
+
+    const emailOkKey = guestSaasEmailOkRedisKey(emailNorm);
+    const emailOk = await redisGetSafe(emailOkKey);
+    if (!emailOk) {
+        throw {
+            status: 400,
+            message: 'Please verify your email with the code we sent you before continuing to payment.'
+        };
+    }
+    await redisClient.del(emailOkKey);
 
     const salt = await bcrypt.genSalt();
     const passwordHash = await bcrypt.hash(String(password), salt);

@@ -10,6 +10,24 @@ const router = Router();
 
 const subscriptionRoutes = [
     { method: 'get', path: '/plans', middlewares: [], handler: saasSubscriptionCtlr.getPlans },
+    {
+        method: 'post',
+        path: '/check-signup-email',
+        middlewares: [],
+        handler: saasSubscriptionCtlr.checkSignupEmail
+    },
+    {
+        method: 'post',
+        path: '/guest-send-email-otp',
+        middlewares: [],
+        handler: saasSubscriptionCtlr.sendGuestSignupEmailOtp
+    },
+    {
+        method: 'post',
+        path: '/guest-verify-email-otp',
+        middlewares: [],
+        handler: saasSubscriptionCtlr.verifyGuestSignupEmailOtp
+    },
     { method: 'post', path: '/guest-checkout', middlewares: [], handler: saasSubscriptionCtlr.createGuestCheckout },
     { method: 'post', path: '/complete-guest', middlewares: [], handler: saasSubscriptionCtlr.completeGuestSignup },
     {
