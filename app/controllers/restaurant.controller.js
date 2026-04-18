@@ -886,7 +886,15 @@ restaurantCtlr.updateSubscription = async ({ body, user }) => {
 
     const updatedRestaurant = await Restaurant.findByIdAndUpdate(
         restaurantId,
-        { subscription },
+        {
+            subscription,
+            billingOverride: {
+                enabled: true,
+                tier: subscription,
+                reason: 'superadmin_manual',
+                until: null
+            }
+        },
         { new: true, runValidators: true }
     ).populate('adminId', 'firstName lastName email');
 

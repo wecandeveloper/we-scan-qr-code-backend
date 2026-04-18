@@ -3,6 +3,7 @@ const router = express.Router();
 
 const productCtlr = require('../controllers/product.controller')
 const { authenticateUser, authorizeUser } = require('../middlewares/auth');
+const { requireActiveSaasSubscription } = require('../middlewares/requireActiveSaasSubscription');
 const setupRoutes = require('./route.util');
 const { checkSchema } = require('express-validator');
 // const categoryValidationSchema = require('../validators/product.validator');
@@ -17,7 +18,8 @@ const routes = [
             upload.array('images'),
             checkSchema(productValidationSchema),
             authenticateUser, 
-            authorizeUser(['superAdmin', 'restaurantAdmin'])
+            authorizeUser(['superAdmin', 'restaurantAdmin']),
+            requireActiveSaasSubscription
         ],
         handler: productCtlr.create,
     },
@@ -60,7 +62,8 @@ const routes = [
         middlewares: [
             upload.array('images'),
             authenticateUser, 
-            authorizeUser(['restaurantAdmin'])
+            authorizeUser(['restaurantAdmin']),
+            requireActiveSaasSubscription
         ],
         handler: productCtlr.update,
     },
@@ -69,7 +72,9 @@ const routes = [
         path: '/delete/:productId',
         middlewares: [
             authenticateUser, 
-            authorizeUser(['superAdmin', 'restaurantAdmin'])],
+            authorizeUser(['superAdmin', 'restaurantAdmin']),
+            requireActiveSaasSubscription
+        ],
         handler: productCtlr.delete,
     },
     {
@@ -77,7 +82,9 @@ const routes = [
         path: '/bulk-delete',
         middlewares: [
             authenticateUser, 
-            authorizeUser(['superAdmin', 'restaurantAdmin'])],
+            authorizeUser(['superAdmin', 'restaurantAdmin']),
+            requireActiveSaasSubscription
+        ],
         handler: productCtlr.bulkDelete,
     },
 ]

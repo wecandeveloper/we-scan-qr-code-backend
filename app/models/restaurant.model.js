@@ -217,6 +217,17 @@ const restaurantSchema = new Schema({
             type: Date,
             default: null
         }
+    },
+    // Superadmin comp / manual billing: when enabled, Stripe webhooks do not change restaurant.subscription tier
+    billingOverride: {
+        enabled: { type: Boolean, default: false },
+        tier: {
+            type: String,
+            enum: ['standard', 'premium', 'advanced'],
+            default: 'standard'
+        },
+        reason: { type: String, default: '' },
+        until: { type: Date, default: null }
     }
 }, { timestamps: true });
 

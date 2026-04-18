@@ -80,7 +80,7 @@ const routes = [
                 { name: "favIcon", maxCount: 1 },
             ]),
             authenticateUser, 
-            authorizeUser(['superAdmin', 'restaurantAdmin']),
+            authorizeUser(['superAdmin', 'restaurantAdmin'])
         ],
         handler: restaurantCtlr.update,
     },

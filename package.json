@@ -1,5 +1,5 @@
 {
-  "name": "crunchies-backend",
+  "name": "dine-os-backend",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -8,7 +8,8 @@
     "start": "node index.js",
     "dev": "nodemon index.js",
     "deploy": "webpack --mode production",
-    "seed:super-admin": "node scripts/seed-super-admin.js"
+    "seed:super-admin": "node scripts/seed-super-admin.js",
+    "check:mongodb": "node scripts/check-mongodb.js"
   },
   "keywords": [],
   "author": "",
