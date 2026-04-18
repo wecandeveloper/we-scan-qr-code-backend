@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const { default: mongoose } = require('mongoose');
 const SaasCoupon = require('../../models/saasCoupon.model');
 const SaasSubscription = require('../../models/saasSubscription.model');
@@ -8,15 +9,67 @@ const {
 
 const ctl = {};
 
+function escapeRegex(s) {
+    return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 ctl.create = async ({ user, body }) => {
     if (user.role !== 'superAdmin') {
         throw { status: 403, message: 'Forbidden' };
     }
-    const { name, kind, percentOff, amountOff, currency, durationInMonths, maxRedemptions, expiresAt } =
-        body;
+    const {
+        name,
+        kind,
+        percentOff,
+        amountOff,
+        currency,
+        durationInMonths,
+        maxRedemptions,
+        expiresAt,
+        trialPeriodDays: trialPeriodDaysRaw,
+        promotionCode: promotionCodeInput
+    } = body;
 
     if (!name || !kind) {
         throw { status: 400, message: 'name and kind are required' };
+    }
+
+    if (kind === 'trial_days') {
+        const trialPeriodDays = Number(trialPeriodDaysRaw);
+        if (!Number.isFinite(trialPeriodDays) || trialPeriodDays < 1 || trialPeriodDays > 730) {
+            throw { status: 400, message: 'trialPeriodDays must be a whole number between 1 and 730' };
+        }
+        let promoCode = String(promotionCodeInput || '')
+            .trim()
+            .toUpperCase()
+            .replace(/[^A-Z0-9-_]/g, '');
+        if (!promoCode) {
+            promoCode = `DINEOS-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+        } else if (promoCode.length < 4) {
+            throw { status: 400, message: 'Promotion code must be at least 4 characters' };
+        }
+        const dup = await SaasCoupon.findOne({ promotionCode: promoCode });
+        if (dup) {
+            throw { status: 400, message: 'That promotion code already exists' };
+        }
+
+        const doc = await SaasCoupon.create({
+            name,
+            kind: 'trial_days',
+            stripeCouponId: null,
+            stripePromotionCodeId: null,
+            promotionCode: promoCode,
+            trialPeriodDays: Math.floor(trialPeriodDays),
+            durationInMonths: null,
+            percentOff: null,
+            amountOff: null,
+            currency: 'aed',
+            maxRedemptions: maxRedemptions ? Number(maxRedemptions) : null,
+            expiresAt: expiresAt ? new Date(expiresAt) : null,
+            createdBy: user.id
+        });
+
+        return { message: 'Trial promotion created', data: doc };
     }
 
     const stripe = requireSaasStripe();
@@ -46,7 +99,7 @@ ctl.create = async ({ user, body }) => {
         }
     } else if (kind === 'free_period') {
         if (!durationInMonths || durationInMonths < 1) {
-            throw { status: 400, message: 'free_period requires durationInMonths >= 1' };
+            throw { status: 400, message: 'free_period requires durationInMonths >= 1 (full discount for that many monthly invoices)' };
         }
         couponParams.percent_off = 100;
         couponParams.duration = 'repeating';
@@ -72,6 +125,7 @@ ctl.create = async ({ user, body }) => {
         amountOff: amountOff || null,
         currency: (currency || 'aed').toLowerCase(),
         durationInMonths: durationInMonths || null,
+        trialPeriodDays: null,
         maxRedemptions: maxRedemptions || null,
         expiresAt: expiresAt ? new Date(expiresAt) : null,
         createdBy: user.id
@@ -80,12 +134,36 @@ ctl.create = async ({ user, body }) => {
     return { message: 'Coupon created', data: doc };
 };
 
-ctl.list = async ({ user }) => {
+ctl.list = async ({ user, query }) => {
     if (user.role !== 'superAdmin') {
         throw { status: 403, message: 'Forbidden' };
     }
-    const items = await SaasCoupon.find().sort({ createdAt: -1 }).lean();
-    return { message: 'OK', data: items };
+    const page = Math.max(1, parseInt(query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(query.limit, 10) || 15));
+    const skip = (page - 1) * limit;
+
+    const search = String(query.search || '').trim();
+    const kind = String(query.kind || '').trim();
+    const sortBy = ['createdAt', 'name', 'promotionCode', 'kind'].includes(query.sortBy)
+        ? query.sortBy
+        : 'createdAt';
+    const sortDir = query.sortDir === 'asc' ? 1 : -1;
+
+    const filter = {};
+    if (kind && ['percent_off', 'amount_off', 'free_period', 'trial_days'].includes(kind)) {
+        filter.kind = kind;
+    }
+    if (search) {
+        const rx = new RegExp(escapeRegex(search), 'i');
+        filter.$or = [{ name: rx }, { promotionCode: rx }];
+    }
+
+    const [items, total] = await Promise.all([
+        SaasCoupon.find(filter).sort({ [sortBy]: sortDir }).skip(skip).limit(limit).lean(),
+        SaasCoupon.countDocuments(filter)
+    ]);
+
+    return { message: 'OK', data: { items, page, limit, total } };
 };
 
 ctl.applyPromotionCode = async ({ user, body }) => {

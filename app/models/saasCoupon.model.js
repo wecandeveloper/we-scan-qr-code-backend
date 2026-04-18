@@ -5,7 +5,7 @@ const saasCouponSchema = new Schema(
         name: { type: String, required: true },
         kind: {
             type: String,
-            enum: ['percent_off', 'amount_off', 'free_period'],
+            enum: ['percent_off', 'amount_off', 'free_period', 'trial_days'],
             required: true
         },
         stripeCouponId: { type: String, default: null },
@@ -15,6 +15,8 @@ const saasCouponSchema = new Schema(
         amountOff: { type: Number, default: null },
         currency: { type: String, default: 'aed' },
         durationInMonths: { type: Number, default: null },
+        /** When kind === trial_days — Stripe Checkout subscription_data.trial_period_days */
+        trialPeriodDays: { type: Number, default: null },
         maxRedemptions: { type: Number, default: null },
         expiresAt: { type: Date, default: null },
         isActive: { type: Boolean, default: true },
@@ -23,5 +25,7 @@ const saasCouponSchema = new Schema(
     },
     { timestamps: true }
 );
+
+saasCouponSchema.index({ promotionCode: 1 }, { unique: true, sparse: true });
 
 module.exports = model('SaasCoupon', saasCouponSchema);

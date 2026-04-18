@@ -17,6 +17,7 @@ const {
     upsertSaasSubscriptionFromStripe
 } = require('../../services/saasStripe/subscriptionSync.service');
 const { provisionGuestSignupFromStripeSession } = require('../../services/saasStripe/guestSaasSignup.service');
+const { resolvePromotionForCheckout } = require('../../services/saasStripe/saasPromotionCheckout.service');
 const redisClient = require('../../config/redis');
 const { sendMailFunc } = require('../../services/nodemailerService/nodemailer.service');
 const { otpMailTemplate } = require('../../services/nodemailerService/templates');
@@ -208,6 +209,10 @@ ctl.verifyGuestSignupEmailOtp = async ({ body }) => {
     return { message: 'Email verified', data: { verified: true } };
 };
 
+function escapeRegexAdmin(s) {
+    return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 ctl.createGuestCheckout = async ({ body }) => {
     const {
         firstName,
@@ -218,7 +223,8 @@ ctl.createGuestCheckout = async ({ body }) => {
         tier,
         interval: intervalRaw,
         phoneNumber,
-        phoneCountryCode
+        phoneCountryCode,
+        promotionCode: promotionCodeRaw
     } = body;
 
     const emailNorm = normalizeGuestEmail(email);
@@ -275,7 +281,25 @@ ctl.createGuestCheckout = async ({ body }) => {
     const priceId = priceIdForTier(tier, interval);
     const frontend = process.env.FRONTEND_URL || 'http://localhost:3030';
 
-    const session = await stripe.checkout.sessions.create({
+    let promoOpts = { discounts: undefined, subscriptionData: {} };
+    if (promotionCodeRaw) {
+        try {
+            promoOpts = await resolvePromotionForCheckout(promotionCodeRaw);
+        } catch (e) {
+            if (e.status === 400) {
+                throw { status: 400, message: e.message };
+            }
+            throw e;
+        }
+    }
+
+    const subscriptionMetadata = {
+        signupSource: 'guest_saas',
+        pendingSignupId: String(pending._id),
+        tier,
+        billingInterval: interval
+    };
+    const sessionParams = {
         mode: 'subscription',
         payment_method_types: ['card'],
         line_items: [{ price: priceId, quantity: 1 }],
@@ -289,14 +313,15 @@ ctl.createGuestCheckout = async ({ body }) => {
             billingInterval: interval
         },
         subscription_data: {
-            metadata: {
-                signupSource: 'guest_saas',
-                pendingSignupId: String(pending._id),
-                tier,
-                billingInterval: interval
-            }
+            metadata: subscriptionMetadata,
+            ...promoOpts.subscriptionData
         }
-    });
+    };
+    if (promoOpts.discounts?.length) {
+        sessionParams.discounts = promoOpts.discounts;
+    }
+
+    const session = await stripe.checkout.sessions.create(sessionParams);
 
     pending.stripeCheckoutSessionId = session.id;
     await pending.save();
@@ -348,7 +373,8 @@ ctl.completeGuestSignup = async ({ body }) => {
 };
 
 ctl.createCheckout = async ({ body, user }) => {
-    const { tier, interval: intervalRaw, restaurantId: bodyRestaurantId } = body;
+    const { tier, interval: intervalRaw, restaurantId: bodyRestaurantId, promotionCode: promotionCodeRaw } =
+        body;
     if (!['standard', 'premium', 'advanced'].includes(tier)) {
         throw { status: 400, message: 'Invalid tier' };
     }
@@ -387,7 +413,25 @@ ctl.createCheckout = async ({ body, user }) => {
     const priceId = priceIdForTier(tier, interval);
     const frontend = process.env.FRONTEND_URL || 'http://localhost:3030';
 
-    const session = await stripe.checkout.sessions.create({
+    let promoOpts = { discounts: undefined, subscriptionData: {} };
+    if (promotionCodeRaw) {
+        try {
+            promoOpts = await resolvePromotionForCheckout(promotionCodeRaw);
+        } catch (e) {
+            if (e.status === 400) {
+                throw { status: 400, message: e.message };
+            }
+            throw e;
+        }
+    }
+
+    const subMeta = {
+        restaurantId: String(restaurantId),
+        userId: metadataUserId,
+        tier,
+        billingInterval: interval
+    };
+    const sessionParams = {
         mode: 'subscription',
         payment_method_types: ['card'],
         line_items: [{ price: priceId, quantity: 1 }],
@@ -402,14 +446,15 @@ ctl.createCheckout = async ({ body, user }) => {
             billingInterval: interval
         },
         subscription_data: {
-            metadata: {
-                restaurantId: String(restaurantId),
-                userId: metadataUserId,
-                tier,
-                billingInterval: interval
-            }
+            metadata: subMeta,
+            ...promoOpts.subscriptionData
         }
-    });
+    };
+    if (promoOpts.discounts?.length) {
+        sessionParams.discounts = promoOpts.discounts;
+    }
+
+    const session = await stripe.checkout.sessions.create(sessionParams);
 
     await SaasSubscription.findOneAndUpdate(
         { restaurantId },
@@ -537,15 +582,31 @@ ctl.adminList = async ({ user, query }) => {
     const limit = Math.min(50, Math.max(1, parseInt(query.limit, 10) || 20));
     const skip = (page - 1) * limit;
 
+    const search = String(query.search || '').trim();
+    const tier = String(query.tier || '').trim();
+    const filter = {};
+    if (search) {
+        filter.name = new RegExp(escapeRegexAdmin(search), 'i');
+    }
+    if (tier && ['standard', 'premium', 'advanced'].includes(tier)) {
+        filter.subscription = tier;
+    }
+
+    const sortBy = ['updatedAt', 'name', 'subscription', 'createdAt'].includes(query.sortBy)
+        ? query.sortBy
+        : 'updatedAt';
+    const sortDir = query.sortDir === 'asc' ? 1 : -1;
+    const sort = { [sortBy]: sortDir };
+
     const [restaurants, total] = await Promise.all([
-        Restaurant.find()
+        Restaurant.find(filter)
             .select('name slug subscription billingOverride adminId isApproved isBlocked')
             .populate('adminId', 'firstName lastName email phone')
-            .sort({ updatedAt: -1 })
+            .sort(sort)
             .skip(skip)
             .limit(limit)
             .lean(),
-        Restaurant.countDocuments()
+        Restaurant.countDocuments(filter)
     ]);
 
     const ids = restaurants.map((r) => r._id);
