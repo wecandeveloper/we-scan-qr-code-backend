@@ -21,10 +21,11 @@ const sendMailFunc = ({ to, subject, html, cc }) => {
 
     transporter.sendMail(data, (error) => {
       if (error) {
-        reject({
-          isSend: false,
-          error,
-        });
+        const err =
+          error instanceof Error
+            ? error
+            : new Error(error?.message || error?.toString?.() || "sendMail failed");
+        reject(err);
       } else {
         resolve({
           isSend: true,

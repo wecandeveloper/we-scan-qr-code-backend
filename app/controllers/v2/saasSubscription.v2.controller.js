@@ -119,6 +119,14 @@ ctl.sendGuestSignupEmailOtp = async ({ body }) => {
     if (!emailNorm || !GUEST_EMAIL_RE.test(emailNorm)) {
         throw { status: 400, message: 'Valid email is required' };
     }
+    if (!process.env.EMAIL || !String(process.env.APP_PASSWORD || '').trim()) {
+        console.error('[sendGuestSignupEmailOtp] Missing EMAIL or APP_PASSWORD env');
+        throw {
+            status: 503,
+            message:
+                'Email service is not configured on the server (set EMAIL and APP_PASSWORD for Gmail SMTP).'
+        };
+    }
     const existing = await User.findOne({ 'email.address': emailNorm }).select('_id').lean();
     if (existing) {
         throw { status: 400, message: 'This email is already registered.' };
@@ -150,14 +158,22 @@ ctl.sendGuestSignupEmailOtp = async ({ body }) => {
             subject: 'DineOS — verify your email',
             html: otpMailTemplate(otp)
         });
-        if (!mailData.isSend) {
+        if (!mailData?.isSend) {
             await redisClient.del(otpKey);
             throw { status: 400, message: 'Could not send email. Try again later.' };
         }
     } catch (err) {
         if (err.status) throw err;
         await redisClient.del(otpKey);
-        throw { status: 400, message: 'Could not send email. Try again later.' };
+        const detail = err?.message || String(err);
+        console.error('[sendGuestSignupEmailOtp] sendMail failed:', detail);
+        const isProd = process.env.NODE_ENV === 'production';
+        throw {
+            status: 502,
+            message: isProd
+                ? 'Could not send verification email. The server mail settings may be invalid (Gmail requires an App Password).'
+                : `Could not send verification email: ${detail}`
+        };
     }
 
     return { message: 'Verification code sent', data: { sent: true } };
