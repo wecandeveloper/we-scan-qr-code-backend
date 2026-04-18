@@ -502,12 +502,15 @@ ctl.me = async ({ user }) => {
 
     const override = restaurant?.billingOverride;
 
-    // After Checkout, webhooks can lag; refresh from Stripe once when we have a sub id but not active yet.
-    if (
-        saas?.stripeSubscriptionId &&
-        saas.status === 'pending' &&
-        !override?.enabled
-    ) {
+    const subscriptionLooksPaid = (doc) =>
+        Boolean(
+            doc &&
+                (doc.status === 'active' ||
+                    ['active', 'trialing'].includes(String(doc.stripeStatus || '').toLowerCase()))
+        );
+
+    // After checkout, Mongo can lag behind Stripe; refresh when we would still block dashboard access.
+    if (saas?.stripeSubscriptionId && !override?.enabled && !subscriptionLooksPaid(saas)) {
         try {
             const stripe = requireSaasStripe();
             const sub = await stripe.subscriptions.retrieve(saas.stripeSubscriptionId, {
