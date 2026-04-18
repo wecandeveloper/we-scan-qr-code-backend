@@ -28,6 +28,12 @@ const routes = [
         handler: userCtlr.login
     },
     {
+        method: 'post',
+        path: '/impersonate-restaurant/:restaurantId',
+        middlewares: [authenticateUser, authorizeUser(['superAdmin'])],
+        handler: userCtlr.impersonateRestaurantAdmin
+    },
+    {
         method: 'get',
         path: '/account',
         middlewares: [authenticateUser, authorizeUser(["customer", "restaurantAdmin", "superAdmin"])],

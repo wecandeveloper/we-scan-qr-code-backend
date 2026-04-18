@@ -564,4 +564,52 @@ userCtlr.fPVerifyOtpAndChangePassword=async(req,res)=>{
     }
 }
 
+/** Super admin only: JWT for the restaurant's admin (passwordless support login). */
+userCtlr.impersonateRestaurantAdmin = async ({ params: { restaurantId } }) => {
+    if (!restaurantId || !mongoose.Types.ObjectId.isValid(restaurantId)) {
+        throw returnError(400, "Valid Restaurant ID is required");
+    }
+
+    const restaurant = await Restaurant.findById(restaurantId).select("adminId name").lean();
+    if (!restaurant) {
+        throw returnError(404, "Restaurant not found");
+    }
+    if (!restaurant.adminId) {
+        throw returnError(400, "Restaurant has no admin user");
+    }
+
+    const targetUser = await User.findById(restaurant.adminId);
+    if (!targetUser) {
+        throw returnError(404, "Restaurant admin account not found");
+    }
+    if (targetUser.role !== "restaurantAdmin") {
+        throw returnError(400, "Target account is not a restaurant admin");
+    }
+
+    const rid = String(restaurantId);
+    if (String(targetUser.restaurantId || "") !== rid) {
+        await User.findByIdAndUpdate(targetUser._id, { restaurantId: restaurant._id });
+    }
+
+    const tokenData = {
+        id: targetUser._id,
+        role: targetUser.role,
+        userId: targetUser.userId,
+        email: targetUser.email?.address,
+        number: targetUser.phone?.number,
+        restaurantId: rid,
+    };
+    const token = jwt.sign(tokenData, process.env.JWT_SECRET, { expiresIn: "7d" });
+
+    const updatedUser = await User.findByIdAndUpdate(
+        targetUser._id,
+        { jwtToken: token, restaurantId: restaurant._id },
+        { new: true }
+    )
+        .select({ password: 0 })
+        .populate("restaurantId", "name");
+
+    return { token, user: updatedUser };
+};
+
 module.exports = userCtlr
