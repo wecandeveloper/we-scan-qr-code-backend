@@ -400,9 +400,10 @@ restaurantCtlr.update = async ({ params: { restaurantId }, body, files, user }) 
         throw { status: 400, message: "Valid Restaurant ID is required" };
     }
 
-    // 🛑 Verify if the user owns this restaurant
     const userData = await User.findById(user.id);
-    if (String(restaurantId) !== String(userData.restaurantId)) {
+    const isSuperAdmin = user.role === 'superAdmin';
+    // 🛑 Restaurant admins may only update their own restaurant; super admins may update any
+    if (!isSuperAdmin && String(restaurantId) !== String(userData.restaurantId)) {
         throw { status: 403, message: "You are not authorized to update this restaurant" };
     }
 
@@ -414,8 +415,8 @@ restaurantCtlr.update = async ({ params: { restaurantId }, body, files, user }) 
 
     // 🔍 Check if restaurant name is already taken
     if (body.name) {
-        // Check if name has been changed before
-        if (existingRestaurant.nameChanged && body.name !== existingRestaurant.name) {
+        // Check if name has been changed before (restaurant admins only)
+        if (!isSuperAdmin && existingRestaurant.nameChanged && body.name !== existingRestaurant.name) {
             throw { status: 400, message: "Restaurant name can only be changed once. Please contact support if you need to change it again." };
         }
         
@@ -460,13 +461,25 @@ restaurantCtlr.update = async ({ params: { restaurantId }, body, files, user }) 
 
     };
 
-    // ✅ If restaurant name changes, update slug and set nameChanged flag
-    if (body.name && body.name !== existingRestaurant.name) {
-        updateData.slug = slugify(body.name, { lower: true });
-        updateData.nameChanged = true; // Mark that name has been changed
-    } else {
-        updateData.slug = existingRestaurant.slug;
+    // ✅ Slug: super admin may set a custom URL slug; others derive from name change rules
+    let nextSlug = existingRestaurant.slug;
+    if (isSuperAdmin && body.slug != null && String(body.slug).trim() !== '') {
+        const candidate = slugify(String(body.slug).trim(), { lower: true, strict: true });
+        if (!candidate || candidate.length < 2) {
+            throw { status: 400, message: 'Invalid menu URL slug' };
+        }
+        const taken = await Restaurant.findOne({ slug: candidate, _id: { $ne: restaurantId } });
+        if (taken) {
+            throw { status: 400, message: 'That menu URL slug is already in use' };
+        }
+        nextSlug = candidate;
+    } else if (body.name && body.name !== existingRestaurant.name) {
+        nextSlug = slugify(body.name, { lower: true });
+        if (!isSuperAdmin) {
+            updateData.nameChanged = true;
+        }
     }
+    updateData.slug = nextSlug;
 
     // Helper to handle merging images
     const mergeImages = async (existingImagesInDB, existingImagesFromFrontend = [], newFiles = [], folder = "") => {
@@ -689,8 +702,15 @@ restaurantCtlr.update = async ({ params: { restaurantId }, body, files, user }) 
         updateData.paymentSettings = paymentSettings;
     }
 
-    // 🔄 If the name changed, regenerate QR code
-    if (body.name && body.name !== existingRestaurant.name) {
+    // 🔄 QR: uploaded image, super-admin pasted URL, or auto-regenerate when name/slug changes
+    const slugChanged = String(updateData.slug) !== String(existingRestaurant.slug);
+    if (files?.qrCode && files.qrCode.length > 0) {
+        const f = files.qrCode[0];
+        const uploaded = await uploadImageBuffer(f.buffer, null, `${existingRestaurant.folderKey}/Qr-Code`);
+        updateData.qrCodeURL = uploaded.secure_url;
+    } else if (isSuperAdmin && typeof body.qrCodeURL === 'string' && body.qrCodeURL.trim()) {
+        updateData.qrCodeURL = body.qrCodeURL.trim();
+    } else if ((body.name && body.name !== existingRestaurant.name) || slugChanged) {
         const restaurantUrl = `${websiteUrl}/restaurant/${updateData.slug}`;
         const qrBuffer = await generateQRCodeURL(restaurantUrl);
         const uploadedQR = await uploadImageBuffer(qrBuffer, null, `${existingRestaurant.folderKey}/Qr-Code`);

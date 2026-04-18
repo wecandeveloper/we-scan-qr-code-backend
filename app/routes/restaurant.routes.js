@@ -78,6 +78,7 @@ const routes = [
                 { name: "bannerImages", maxCount: 5 },
                 { name: "offerBannerImages", maxCount: 5 },
                 { name: "favIcon", maxCount: 1 },
+                { name: "qrCode", maxCount: 1 },
             ]),
             authenticateUser, 
             authorizeUser(['superAdmin', 'restaurantAdmin'])
