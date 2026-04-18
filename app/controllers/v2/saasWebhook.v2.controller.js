@@ -11,6 +11,7 @@ const {
     notifyInvoicePaymentActionRequired
 } = require('../../services/saasStripe/saasBillingNotify.service');
 const { default: mongoose } = require('mongoose');
+const { provisionGuestSignupFromStripeSession } = require('../../services/saasStripe/guestSaasSignup.service');
 
 async function claimEvent(eventId, type) {
     try {
@@ -26,6 +27,13 @@ async function claimEvent(eventId, type) {
 
 async function handleCheckoutSessionCompleted(session) {
     if (session.mode !== 'subscription' || !session.subscription) {
+        return;
+    }
+    if (session.metadata?.signupSource === 'guest_saas' && session.metadata?.pendingSignupId) {
+        const result = await provisionGuestSignupFromStripeSession(session);
+        if (!result.ok) {
+            console.error('[saas webhook] guest provision', result.reason);
+        }
         return;
     }
     const restaurantId = session.metadata?.restaurantId;

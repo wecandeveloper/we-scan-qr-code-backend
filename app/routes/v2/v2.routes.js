@@ -10,10 +10,12 @@ const router = Router();
 
 const subscriptionRoutes = [
     { method: 'get', path: '/plans', middlewares: [], handler: saasSubscriptionCtlr.getPlans },
+    { method: 'post', path: '/guest-checkout', middlewares: [], handler: saasSubscriptionCtlr.createGuestCheckout },
+    { method: 'post', path: '/complete-guest', middlewares: [], handler: saasSubscriptionCtlr.completeGuestSignup },
     {
         method: 'post',
         path: '/checkout',
-        middlewares: [authenticateUser, authorizeUser(['restaurantAdmin'])],
+        middlewares: [authenticateUser, authorizeUser(['restaurantAdmin', 'superAdmin'])],
         handler: saasSubscriptionCtlr.createCheckout
     },
     {

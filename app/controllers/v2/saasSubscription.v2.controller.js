@@ -1,5 +1,9 @@
 const { default: mongoose } = require('mongoose');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 const Restaurant = require('../../models/restaurant.model');
+const User = require('../../models/user.model');
+const PendingSaasSignup = require('../../models/pendingSaasSignup.model');
 const SaasSubscription = require('../../models/saasSubscription.model');
 const SaasInvoice = require('../../models/saasInvoice.model');
 const { getRestaurantIdForRestaurantAdmin } = require('../../utils/restaurantIdForUser');
@@ -12,6 +16,7 @@ const {
 const {
     upsertSaasSubscriptionFromStripe
 } = require('../../services/saasStripe/subscriptionSync.service');
+const { provisionGuestSignupFromStripeSession } = require('../../services/saasStripe/guestSaasSignup.service');
 
 const ctl = {};
 
@@ -70,24 +75,176 @@ ctl.getPlans = async () => {
     return { message: 'Plans', data };
 };
 
-ctl.createCheckout = async ({ body, user }) => {
-    if (user.role !== 'restaurantAdmin') {
-        throw { status: 403, message: 'Only restaurant admins can subscribe' };
+function normalizeGuestEmail(email) {
+    return String(email || '')
+        .trim()
+        .toLowerCase();
+}
+
+ctl.createGuestCheckout = async ({ body }) => {
+    const {
+        firstName,
+        lastName,
+        email,
+        password,
+        restaurantName,
+        tier,
+        interval: intervalRaw,
+        phoneNumber,
+        phoneCountryCode
+    } = body;
+
+    const emailNorm = normalizeGuestEmail(email);
+    if (!emailNorm || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailNorm)) {
+        throw { status: 400, message: 'Valid email is required' };
     }
-    const { tier, interval: intervalRaw } = body;
+    if (!password || String(password).length < 8) {
+        throw { status: 400, message: 'Password must be at least 8 characters' };
+    }
+    const rName = String(restaurantName || '').trim();
+    if (rName.length < 2) {
+        throw { status: 400, message: 'Restaurant name is required' };
+    }
     if (!['standard', 'premium', 'advanced'].includes(tier)) {
         throw { status: 400, message: 'Invalid tier' };
     }
     const interval = intervalRaw === 'year' ? 'year' : 'month';
-    const restaurantId = await getRestaurantIdForRestaurantAdmin(user);
-    if (!restaurantId) {
-        throw { status: 400, message: 'Create your restaurant profile before subscribing' };
+
+    const existing = await User.findOne({ 'email.address': emailNorm });
+    if (existing) {
+        throw {
+            status: 400,
+            message: 'An account with this email already exists. Sign in to manage your subscription.'
+        };
+    }
+
+    const salt = await bcrypt.genSalt();
+    const passwordHash = await bcrypt.hash(String(password), salt);
+
+    const pending = await PendingSaasSignup.create({
+        email: emailNorm,
+        passwordHash,
+        firstName: String(firstName || '').trim(),
+        lastName: String(lastName || '').trim(),
+        restaurantName: rName,
+        phoneNumber: phoneNumber ? String(phoneNumber).trim() : '',
+        phoneCountryCode: phoneCountryCode ? String(phoneCountryCode).trim() : '',
+        tier,
+        interval,
+        status: 'pending'
+    });
+
+    const stripe = requireSaasStripe();
+    const priceId = priceIdForTier(tier, interval);
+    const frontend = process.env.FRONTEND_URL || 'http://localhost:3030';
+
+    const session = await stripe.checkout.sessions.create({
+        mode: 'subscription',
+        payment_method_types: ['card'],
+        line_items: [{ price: priceId, quantity: 1 }],
+        success_url: `${frontend}/post-checkout?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${frontend}/?canceled=1`,
+        customer_email: emailNorm,
+        metadata: {
+            signupSource: 'guest_saas',
+            pendingSignupId: String(pending._id),
+            tier,
+            billingInterval: interval
+        },
+        subscription_data: {
+            metadata: {
+                signupSource: 'guest_saas',
+                pendingSignupId: String(pending._id),
+                tier,
+                billingInterval: interval
+            }
+        }
+    });
+
+    pending.stripeCheckoutSessionId = session.id;
+    await pending.save();
+
+    return {
+        message: 'Checkout session created',
+        data: { url: session.url, sessionId: session.id }
+    };
+};
+
+ctl.completeGuestSignup = async ({ body }) => {
+    const { sessionId } = body;
+    if (!sessionId || typeof sessionId !== 'string') {
+        throw { status: 400, message: 'sessionId is required' };
+    }
+
+    const stripe = requireSaasStripe();
+    const session = await stripe.checkout.sessions.retrieve(sessionId, { expand: ['subscription'] });
+
+    if (session.metadata?.signupSource !== 'guest_saas' || !session.metadata?.pendingSignupId) {
+        throw { status: 400, message: 'Invalid checkout session' };
+    }
+
+    const result = await provisionGuestSignupFromStripeSession(session);
+    if (!result.ok) {
+        if (result.reason === 'unpaid') {
+            throw { status: 402, message: 'Payment not completed yet. Try again in a moment.' };
+        }
+        throw { status: 400, message: result.reason || 'Could not finish signup' };
+    }
+
+    const user = await User.findById(result.userId).populate('restaurantId', 'name').select('-password');
+    if (!user) {
+        throw { status: 500, message: 'Account not found after checkout' };
+    }
+
+    const tokenData = {
+        id: user._id,
+        role: user.role,
+        userId: user.userId,
+        email: user.email.address,
+        number: user.phone?.number || ''
+    };
+    const token = jwt.sign(tokenData, process.env.JWT_SECRET, { expiresIn: '7d' });
+    await User.findByIdAndUpdate(user._id, { jwtToken: token });
+
+    const fresh = await User.findById(user._id).populate('restaurantId', 'name').select('-password');
+    return { token, user: fresh };
+};
+
+ctl.createCheckout = async ({ body, user }) => {
+    const { tier, interval: intervalRaw, restaurantId: bodyRestaurantId } = body;
+    if (!['standard', 'premium', 'advanced'].includes(tier)) {
+        throw { status: 400, message: 'Invalid tier' };
+    }
+    const interval = intervalRaw === 'year' ? 'year' : 'month';
+
+    let restaurantId;
+    if (user.role === 'restaurantAdmin') {
+        restaurantId = await getRestaurantIdForRestaurantAdmin(user);
+        if (!restaurantId) {
+            throw { status: 400, message: 'Create your restaurant profile before subscribing' };
+        }
+    } else if (user.role === 'superAdmin') {
+        if (!bodyRestaurantId || !mongoose.Types.ObjectId.isValid(bodyRestaurantId)) {
+            throw {
+                status: 400,
+                message:
+                    'Super admin checkout requires restaurantId in the JSON body (the restaurant to bill).'
+            };
+        }
+        restaurantId = bodyRestaurantId;
+    } else {
+        throw { status: 403, message: 'Only restaurant or super admin accounts can start subscription checkout' };
     }
 
     const restaurant = await Restaurant.findById(restaurantId);
     if (!restaurant) {
         throw { status: 404, message: 'Restaurant not found' };
     }
+
+    const ownerAdminId = restaurant.adminId;
+    const adminUser = await User.findById(ownerAdminId).select('email.address');
+    const customerEmail = adminUser?.email?.address || user.email || undefined;
+    const metadataUserId = String(ownerAdminId || user.id);
 
     const stripe = requireSaasStripe();
     const priceId = priceIdForTier(tier, interval);
@@ -100,17 +257,17 @@ ctl.createCheckout = async ({ body, user }) => {
         success_url: `${frontend}/restaurant-admin/billing?session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${frontend}/?canceled=1`,
         client_reference_id: String(restaurantId),
-        customer_email: user.email || undefined,
+        customer_email: customerEmail,
         metadata: {
             restaurantId: String(restaurantId),
-            userId: String(user.id),
+            userId: metadataUserId,
             tier,
             billingInterval: interval
         },
         subscription_data: {
             metadata: {
                 restaurantId: String(restaurantId),
-                userId: String(user.id),
+                userId: metadataUserId,
                 tier,
                 billingInterval: interval
             }
@@ -122,7 +279,7 @@ ctl.createCheckout = async ({ body, user }) => {
         {
             $set: {
                 restaurantId,
-                adminUserId: user.id,
+                adminUserId: ownerAdminId,
                 pendingCheckoutSessionId: session.id,
                 status: 'pending',
                 tier

@@ -5,6 +5,8 @@ const configureDB = require('./app/config/db');
 const { corsOptions } = require('./app/config/corsOptions');
 const router = require('./app/routes/common.routes');
 const v2Router = require('./app/routes/v2/v2.routes');
+const commonController = require('./app/controllers/common.controller');
+const saasSubscriptionV2 = require('./app/controllers/v2/saasSubscription.v2.controller');
 const { handleStripeWebhook } = require('./app/controllers/v2/saasWebhook.v2.controller');
 const app = express();
 const PORT = 5030;
@@ -29,6 +31,15 @@ async function start() {
     app.use(express.json());
 
     app.use('/api', router);
+    // Public SaaS signup (aliases on /api/* so proxies that only forward /api work; same handlers as v2)
+    app.post(
+        '/api/subscriptions/guest-checkout',
+        commonController(saasSubscriptionV2.createGuestCheckout)
+    );
+    app.post(
+        '/api/subscriptions/complete-guest',
+        commonController(saasSubscriptionV2.completeGuestSignup)
+    );
     app.use('/api/v2', v2Router);
 
     app.get('/', (req, res) => {
