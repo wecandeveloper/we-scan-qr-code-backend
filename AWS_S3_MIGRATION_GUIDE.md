@@ -1,30 +1,24 @@
-# AWS S3 Migration Guide
+# Object storage migration guide (DigitalOcean Spaces)
 
 ## 📋 Migration Summary
 
-This guide outlines the migration from Cloudinary to AWS S3 while maintaining backward compatibility with existing Cloudinary URLs.
+This guide outlines object storage for uploads: **DigitalOcean Spaces** (S3-compatible API via `aws-sdk` v2), with backward compatibility for **legacy AWS S3 URLs** and **Cloudinary** URLs still stored in the database.
 
 ## 🎯 Migration Strategy: Gradual Dual-Provider Approach
 
 ### ✅ What We've Implemented
 
-1. **AWS S3 Service** (`app/services/awsService/aws.uploader.js`)
-   - Matching functions to Cloudinary service
-   - Same API structure for easy migration
-   - Functions: `uploadImageBuffer`, `processMultipleImageBuffers`, `deleteS3Images`, etc.
+1. **Spaces uploader** (`app/services/awsService/aws.uploader.js`)
+   - Same surface area as the Cloudinary uploader where applicable
+   - Functions: `uploadImageBuffer`, `processMultipleImageBuffers`, `deleteS3Images`, `getSignedGetObjectUrl`, etc.
 
 2. **Unified Uploader Service** (`app/services/unifiedUploader/unified.uploader.js`)
-   - **Smart Provider Detection**: Automatically detects Cloudinary vs S3 URLs
-   - **New Uploads → S3**: All new uploads go to AWS S3
-   - **Old URLs → Cloudinary**: Old Cloudinary URLs are still handled correctly
-   - **Unified Delete**: Automatically routes delete operations to the correct provider
+   - **Provider detection**: Cloudinary vs object storage (Spaces CDN, DigitalOcean hostnames, legacy AWS S3 URLs)
+   - **New uploads → Spaces** via S3-compatible API
+   - **Unified delete**: Routes to Cloudinary or Spaces as appropriate
 
-3. **AWS Configuration** (`app/config/aws.js`)
-   - Centralized AWS S3 configuration
-
-4. **AWS Multer** (`app/services/awsService/aws.multer.js`)
-   - Matches Cloudinary multer structure
-   - Same file filtering and memory storage
+3. **Configuration** (`app/config/aws.js`)
+   - DigitalOcean Spaces endpoint, credentials, bucket, CDN base URL (filename kept for minimal import churn)
 
 ## 🔄 How It Works
 
@@ -33,17 +27,17 @@ This guide outlines the migration from Cloudinary to AWS S3 while maintaining ba
 Controllers → Cloudinary Service → Cloudinary
 ```
 
-### During Migration (Dual Provider)
+### During migration (dual provider)
 ```
 Controllers → Unified Service → {
-  New Uploads → AWS S3
+  New uploads → DigitalOcean Spaces
   Old URLs → Cloudinary (for deletion/operations)
 }
 ```
 
-### After Full Migration
+### After full migration (optional)
 ```
-Controllers → Unified Service → AWS S3 (only)
+Controllers → Unified Service → Spaces (only) + legacy URL support until data is rewritten
 ```
 
 ## 📝 Migration Steps
@@ -60,16 +54,20 @@ npm install @aws-sdk/client-s3
 ```
 (If using v3, you'll need to update `app/config/aws.js` accordingly)
 
-### Step 2: Environment Variables
+### Step 2: Environment variables
 
-Ensure these are set in your `.env` file:
+Set these in `.env` (see also `env.saas.example`):
 
 ```env
-# AWS S3 Configuration
-AWS_ACCESS_KEY_ID=your_access_key
-AWS_SECRET_ACCESS_KEY=your_secret_key
-AWS_REGION=your_region (e.g., us-east-1)
-AWS_S3_BUCKET=your_bucket_name
+# DigitalOcean Spaces (S3-compatible)
+DO_SPACES_KEY=your_spaces_access_key
+DO_SPACES_SECRET=your_spaces_secret
+DO_SPACES_BUCKET=your_space_name
+DO_SPACES_ENDPOINT=nyc3.digitaloceanspaces.com
+DO_SPACES_REGION=nyc3
+DO_SPACES_CDN_URL=https://your-space-name.nyc3.cdn.digitaloceanspaces.com
+# Optional: set to none if uploads fail with ACL errors (use Space file listing / bucket policy for public reads)
+# DO_SPACES_OBJECT_ACL=none
 
 # Keep Cloudinary for backward compatibility
 CLOUDINARY_CLOUD_NAME=your_cloud_name
@@ -131,10 +129,10 @@ The unified service handles this automatically - it stores S3 keys in the `publi
 
 ## 🔍 Key Functions Comparison
 
-| Cloudinary Function | AWS S3 Function | Unified Function |
+| Cloudinary Function | Spaces (S3 API) | Unified Function |
 |-------------------|-----------------|------------------|
-| `uploadImageBuffer()` | `uploadImageBuffer()` | `uploadImageBuffer()` → **S3** |
-| `processMultipleImageBuffers()` | `processMultipleImageBuffers()` | `processMultipleImageBuffers()` → **S3** |
+| `uploadImageBuffer()` | `uploadImageBuffer()` | `uploadImageBuffer()` → **Spaces** |
+| `processMultipleImageBuffers()` | `processMultipleImageBuffers()` | `processMultipleImageBuffers()` → **Spaces** |
 | `deleteCloudinaryImages()` | `deleteS3Images()` | `deleteImages()` → **Auto-detect** |
 | `getBufferHash()` | `getBufferHash()` | `getBufferHash()` (same) |
 | `findDuplicateImage()` | `findDuplicateImage()` | `findDuplicateImage()` (same) |
@@ -147,12 +145,15 @@ The unified service handles this automatically - it stores S3 keys in the `publi
    ```javascript
    // Unified service automatically detects provider
    await deleteImages(['https://res.cloudinary.com/...']); // → Cloudinary
-   await deleteImages(['https://bucket.s3.region.amazonaws.com/...']); // → S3
+   await deleteImages(['https://bucket.s3.region.amazonaws.com/...']); // → legacy AWS key extraction
+   await deleteImages(['https://<cdn>/We-QrCode/...']); // → Spaces (CDN prefix from DO_SPACES_CDN_URL)
    ```
 
-2. **URL Detection**:
+2. **URL detection**:
    - URLs containing `cloudinary.com` → Cloudinary
-   - URLs containing `amazonaws.com` or `s3.` → S3
+   - URLs containing `amazonaws.com` or `s3.` (path-style) → object storage
+   - URLs containing `digitaloceanspaces.com` → object storage
+   - URLs starting with `DO_SPACES_CDN_URL` → object storage
 
 3. **PublicId/Key Handling**:
    - Cloudinary publicIds: Short format (e.g., `folder/filename`)
@@ -164,7 +165,7 @@ The unified service handles this automatically - it stores S3 keys in the `publi
 1. **Don't Delete Cloudinary Functions**: Keep them for backward compatibility with old URLs
 2. **Gradual Migration**: You can migrate controllers one by one
 3. **Database URLs**: Old Cloudinary URLs in database will continue to work
-4. **New Uploads**: All new uploads automatically go to S3
+4. **New uploads**: All new uploads go to DigitalOcean Spaces; public URLs use `DO_SPACES_CDN_URL` when set
 5. **No Breaking Changes**: Existing code continues to work during migration
 
 ## 🚀 Future: Full Migration (Optional)
@@ -179,11 +180,10 @@ Once you're confident all new uploads are on S3 and you want to migrate old file
 
 ## 📂 Files Created/Modified
 
-### New Files:
-- `app/config/aws.js` - AWS S3 configuration
-- `app/services/awsService/aws.uploader.js` - AWS S3 uploader service
-- `app/services/awsService/aws.multer.js` - AWS multer configuration (fixed)
-- `app/services/unifiedUploader/unified.uploader.js` - Unified service
+### Key files:
+- `app/config/aws.js` - Spaces endpoint, credentials, CDN base
+- `app/services/awsService/aws.uploader.js` - Upload, delete, URL helpers, optional presigned GET
+- `app/services/unifiedUploader/unified.uploader.js` - Unified entry point for controllers
 
 ### Existing Files (Keep As-Is):
 - `app/services/cloudinaryService/cloudinary.uploader.js` - **Keep for backward compatibility**
@@ -192,14 +192,13 @@ Once you're confident all new uploads are on S3 and you want to migrate old file
 
 ## ✅ Migration Checklist
 
-- [x] AWS S3 service created with matching functions
+- [x] Spaces uploader (`aws-sdk` S3 client + DO endpoint)
 - [x] Unified service with auto-detection
-- [x] AWS configuration file
-- [x] AWS multer configuration
-- [ ] Install `aws-sdk` package
-- [ ] Set environment variables
+- [x] Configuration file (`app/config/aws.js`)
+- [ ] Install `aws-sdk` package (`npm install`)
+- [ ] Set `DO_SPACES_*` environment variables
 - [ ] Update controllers to use unified service (gradual)
-- [ ] Test new uploads (should go to S3)
+- [ ] Test new uploads (appear in Space; API returns CDN URL)
 - [ ] Test old URL deletion (should still work)
 - [ ] Monitor for errors
 - [ ] (Optional) Create migration script for old files
@@ -209,24 +208,27 @@ Once you're confident all new uploads are on S3 and you want to migrate old file
 ### Issue: "AWS SDK not found"
 **Solution**: Run `npm install aws-sdk`
 
-### Issue: "Access Denied" when uploading to S3
-**Solution**: Check AWS credentials and bucket permissions (need `s3:PutObject`, `s3:DeleteObject`)
+### Issue: Access denied when uploading
+**Solution**: Verify Spaces keys, bucket name, and that the access key can `PutObject` / `DeleteObject`
 
 ### Issue: Old Cloudinary URLs not deleting
 **Solution**: Ensure Cloudinary environment variables are still set
 
 ### Issue: Images not publicly accessible
-**Solution**: Check S3 bucket policy allows public read access, or update ACL in `aws.uploader.js`
+**Solution**: Ensure Space or CDN allows anonymous read; set `DO_SPACES_OBJECT_ACL=none` and use a public-read bucket policy if ACLs are disabled
+
+### Issue: Presigned URLs for private files
+**Solution**: Use `getSignedGetObjectUrl` from `app/services/awsService/aws.uploader.js` (same S3 client / bucket)
 
 ## 📞 Next Steps
 
 1. **Review the implementation** - all files are ready
 2. **Install dependencies** - `npm install aws-sdk`
-3. **Set environment variables** - Add AWS credentials
+3. **Set environment variables** - Add `DO_SPACES_*` values
 4. **Start migrating controllers** - Use unified service gradually
 5. **Test thoroughly** - Verify both old and new URLs work
 
 ---
 
-**Summary**: The migration is designed to be **zero-downtime** and **backward-compatible**. Old Cloudinary URLs continue to work while new uploads go to S3. The unified service automatically handles routing between providers.
+**Summary**: Designed for **zero-downtime** and **backward compatibility**: Cloudinary and legacy AWS S3 URLs still delete correctly; new uploads use DigitalOcean Spaces with CDN-first public URLs when `DO_SPACES_CDN_URL` is set.
 

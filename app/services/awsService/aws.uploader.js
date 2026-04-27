@@ -1,6 +1,26 @@
-const { s3, bucket, region } = require('../../config/aws');
+const { s3, bucket, cdnBaseUrl, endpointHost } = require('../../config/aws');
 const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
+
+const skipObjectAcl = ['none', 'false', '0'].includes(
+    String(process.env.DO_SPACES_OBJECT_ACL || '').toLowerCase()
+);
+
+/** Public URL for an object key (CDN when configured, else virtual-hosted Spaces URL). */
+const buildPublicObjectUrl = (key) => {
+    if (!key) return '';
+    const encodedKey = key
+        .split('/')
+        .map((seg) => encodeURIComponent(seg))
+        .join('/');
+    if (cdnBaseUrl) {
+        return `${cdnBaseUrl.replace(/\/+$/, '')}/${encodedKey}`;
+    }
+    if (bucket && endpointHost) {
+        return `https://${bucket}.${endpointHost}/${encodedKey}`;
+    }
+    return encodedKey;
+};
 
 // Generate hash from image buffer (same as Cloudinary)
 const getBufferHash = (buffer) => {
@@ -14,40 +34,80 @@ const generateS3Key = (folder, filename) => {
     return sanitizedFolder ? `${sanitizedFolder}/${sanitizedFilename}` : sanitizedFilename;
 };
 
-// Get S3 URL from key
+// Get public URL from object key (CDN-first)
 const getS3Url = (key) => {
-    return `https://${bucket}.s3.${region}.amazonaws.com/${key}`;
+    return buildPublicObjectUrl(key);
 };
 
-// Extract S3 key from URL
+/**
+ * Extract object key from a stored URL (AWS S3, DigitalOcean Spaces, or CDN origin).
+ */
 const extractS3KeyFromUrl = (url) => {
     if (!url) return null;
+    const trimmed = String(url).trim();
     try {
-        const urlObj = new URL(url);
-        // Handle both formats: bucket.s3.region.amazonaws.com/key or s3.region.amazonaws.com/bucket/key
-        if (urlObj.hostname.includes('s3') && urlObj.hostname.includes('amazonaws.com')) {
-            return urlObj.pathname.substring(1); // Remove leading slash
+        const noQuery = trimmed.split('?')[0];
+        const base = (cdnBaseUrl || '').replace(/\/+$/, '');
+        if (base && (noQuery === base || noQuery.startsWith(`${base}/`))) {
+            const rest = noQuery.slice(base.length).replace(/^\//, '');
+            return rest || null;
         }
+
+        const urlObj = new URL(trimmed);
+        const host = urlObj.hostname.toLowerCase();
+        let path = (urlObj.pathname || '/').replace(/^\/+/, '');
+
+        if (host.endsWith('.digitaloceanspaces.com')) {
+            const hostParts = host.split('.');
+            // Path-style: {region}.digitaloceanspaces.com/{bucket}/{key...}
+            if (hostParts.length === 3) {
+                const segs = path.split('/').filter(Boolean);
+                if (segs.length >= 2) {
+                    return segs.slice(1).join('/');
+                }
+                return segs[0] || null;
+            }
+            // Virtual-hosted: {bucket}.{region}.digitaloceanspaces.com/{key...}
+            return path || null;
+        }
+
+        if (host.includes('amazonaws.com') && host.includes('s3')) {
+            const pathStyleHost =
+                /^s3[.-][a-z0-9-]+\.amazonaws\.com$/i.test(host) ||
+                /^s3\.amazonaws\.com$/i.test(host);
+            if (pathStyleHost) {
+                const segs = path.split('/').filter(Boolean);
+                if (segs.length >= 2) {
+                    return segs.slice(1).join('/');
+                }
+                return segs[0] || null;
+            }
+            return path || null;
+        }
+
         return null;
     } catch (error) {
         return null;
     }
 };
 
-// Upload image from buffer to S3 with optional model-based folder
+// Upload image from buffer to Spaces with optional model-based folder
 const uploadImageBuffer = async (fileBuffer, Model = null, customFolder = null, mimetype = 'image/jpeg') => {
-    // Validate AWS configuration
     if (!bucket) {
-        throw new Error('AWS_S3_BUCKET environment variable is not set');
+        throw new Error('DO_SPACES_BUCKET environment variable is not set');
     }
-    if (!s3.config.credentials) {
-        throw new Error('AWS credentials are not configured. Please set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY');
+    if (!endpointHost) {
+        throw new Error('DO_SPACES_ENDPOINT environment variable is not set (e.g. nyc3.digitaloceanspaces.com)');
+    }
+    if (!s3.config.credentials || !s3.config.credentials.accessKeyId) {
+        throw new Error(
+            'Spaces credentials are not configured. Please set DO_SPACES_KEY and DO_SPACES_SECRET'
+        );
     }
 
     const modelName = Model?.modelName;
     const folder = customFolder || (modelName ? `We-QrCode/${modelName}` : 'We-QrCode');
-    
-    // Generate unique filename
+
     const extension = mimetype.split('/')[1] || 'jpg';
     const filename = `${uuidv4()}.${extension}`;
     const key = generateS3Key(folder, filename);
@@ -57,23 +117,29 @@ const uploadImageBuffer = async (fileBuffer, Model = null, customFolder = null, 
         Key: key,
         Body: fileBuffer,
         ContentType: mimetype
-        // Note: ACL removed - modern S3 buckets use bucket policies for access control
-        // Make sure your bucket policy allows public read access if needed
     };
+    if (!skipObjectAcl) {
+        params.ACL = 'public-read';
+    }
 
     try {
         const data = await s3.upload(params).promise();
-        
-        // Return format similar to Cloudinary response
+        const location = buildPublicObjectUrl(key);
+
         return {
-            secure_url: data.Location,
-            url: data.Location,
-            public_id: key, // Use S3 key as public_id equivalent
+            secure_url: location,
+            url: location,
+            public_id: key,
             key: key,
             etag: data.ETag
         };
     } catch (error) {
-        throw new Error(`S3 upload failed: ${error.message}`);
+        if (!skipObjectAcl && error.code === 'AccessControlListNotSupported') {
+            throw new Error(
+                `Spaces upload failed (ACL not supported on this Space): ${error.message}. Set DO_SPACES_OBJECT_ACL=none and use a bucket policy for public reads.`
+            );
+        }
+        throw new Error(`Spaces upload failed: ${error.message}`);
     }
 };
 
@@ -94,32 +160,29 @@ const processMultipleImageBuffers = async (files, Model = null, customFolder = n
         const hash = getBufferHash(file.buffer);
         const mimetype = file.mimetype || 'image/jpeg';
 
-        // Only check for duplicate if Model is provided
         let duplicate = null;
         if (Model) {
             duplicate = await findDuplicateImage(Model, hash, 'images.hash');
         }
 
         if (duplicate) {
-            // Reuse existing image data when duplicate is found
-            const existingImage = duplicate.images.find(img => img.hash === hash);
+            const existingImage = duplicate.images.find((img) => img.hash === hash);
             if (existingImage) {
                 processedImages.push({
                     url: existingImage.url,
-                    publicId: existingImage.publicId, // Keep publicId field for compatibility
-                    key: existingImage.key || existingImage.publicId, // Add key field
+                    publicId: existingImage.publicId,
+                    key: existingImage.key || existingImage.publicId,
                     hash: existingImage.hash
                 });
                 continue;
             }
         }
 
-        // Upload new image if no duplicate found
         const uploaded = await uploadImageBuffer(file.buffer, Model, folder, mimetype);
 
         processedImages.push({
             url: uploaded.secure_url,
-            publicId: uploaded.key, // Store S3 key as publicId for compatibility
+            publicId: uploaded.key,
             key: uploaded.key,
             hash
         });
@@ -128,39 +191,57 @@ const processMultipleImageBuffers = async (files, Model = null, customFolder = n
     return processedImages;
 };
 
-// Delete single or multiple images from S3
 const deleteS3Images = async (keys = []) => {
     const keyArray = Array.isArray(keys) ? keys : [keys];
-    
+
     for (const key of keyArray) {
         if (!key) continue;
-        
-        // If key is a URL, extract the key from it
-        const s3Key = key.includes('amazonaws.com') ? extractS3KeyFromUrl(key) : key;
-        
+
+        const isHttpUrl = /^https?:\/\//i.test(String(key).trim());
+        const s3Key = isHttpUrl ? extractS3KeyFromUrl(key) : key;
+
         if (!s3Key) {
-            console.warn(`Invalid S3 key/URL: ${key}`);
+            console.warn(`Invalid Spaces key/URL: ${key}`);
             continue;
         }
 
         try {
-            await s3.deleteObject({
-                Bucket: bucket,
-                Key: s3Key
-            }).promise();
+            await s3
+                .deleteObject({
+                    Bucket: bucket,
+                    Key: s3Key
+                })
+                .promise();
         } catch (error) {
-            console.error(`Failed to delete S3 object ${s3Key}:`, error.message);
-            // Don't throw - continue with other deletions
+            console.error(`Failed to delete Spaces object ${s3Key}:`, error.message);
         }
     }
 };
 
-// Helper function to detect if URL is from Cloudinary or S3
 const detectProvider = (url) => {
     if (!url) return null;
     if (url.includes('cloudinary.com')) return 'cloudinary';
     if (url.includes('amazonaws.com') || url.includes('s3.')) return 's3';
+    if (url.includes('digitaloceanspaces.com')) return 's3';
+    const base = (cdnBaseUrl || '').replace(/\/+$/, '');
+    if (base && url.startsWith(base)) return 's3';
     return null;
+};
+
+/**
+ * Presigned GET URL for private objects (optional; public assets use CDN URL).
+ * @param {string} key - Object key
+ * @param {number} [expiresSeconds=300]
+ * @returns {string}
+ */
+const getSignedGetObjectUrl = (key, expiresSeconds = 300) => {
+    if (!key) throw new Error('Object key is required');
+    if (!bucket) throw new Error('DO_SPACES_BUCKET is not set');
+    return s3.getSignedUrl('getObject', {
+        Bucket: bucket,
+        Key: key,
+        Expires: expiresSeconds
+    });
 };
 
 module.exports = {
@@ -171,6 +252,6 @@ module.exports = {
     processMultipleImageBuffers,
     getS3Url,
     extractS3KeyFromUrl,
-    detectProvider
+    detectProvider,
+    getSignedGetObjectUrl
 };
-
